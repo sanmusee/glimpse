@@ -13,6 +13,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+keyring = "3"
+mysql = "25"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
