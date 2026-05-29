@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildSqlGenerationRequest, generateSqlFromQueryNeed } from "./sqlGeneration";
+import {
+  buildSqlGenerationRequest,
+  buildSqlModificationRequest,
+  generateSqlFromQueryNeed,
+  modifySqlFromIntent,
+} from "./sqlGeneration";
 import type { DatabaseCatalogSnapshot, QuerySession } from "./platform/localPersistence";
 
 const session: QuerySession = {
@@ -135,6 +140,79 @@ describe("SQL generation", () => {
     );
     const [, requestInit] = fetchModel.mock.calls[0];
     expect(String(requestInit.body)).toContain('"stream":true');
+    expect(String(requestInit.body)).not.toContain("sk-ai-api-key");
+    expect(String(requestInit.body)).not.toContain("sensitive-row-value");
+  });
+
+  it("builds SQL modification context from the current SQL, Query Session, Candidate Table Set, and catalog", () => {
+    const request = buildSqlModificationRequest({
+      modificationIntent: "Add a date filter for the last 30 days",
+      currentSql: "select id from orders",
+      session,
+      catalog,
+    });
+    const serializedRequest = JSON.stringify(request);
+
+    expect(serializedRequest).toContain("Modify the existing SQL");
+    expect(serializedRequest).toContain("Add a date filter for the last 30 days");
+    expect(serializedRequest).toContain("select id from orders");
+    expect(serializedRequest).toContain("session-1");
+    expect(serializedRequest).toContain("orders");
+    expect(serializedRequest).toContain("Contains order facts");
+    expect(serializedRequest).toContain("CREATE TABLE `orders`");
+    expect(serializedRequest).not.toContain("payments");
+    expect(serializedRequest).not.toContain("db-password-secret");
+    expect(serializedRequest).not.toContain("sk-ai-api-key");
+    expect(serializedRequest).not.toContain("sensitive-row-value");
+    expect(serializedRequest).not.toContain("sample-row-value");
+  });
+
+  it("streams modified SQL from an OpenAI-compatible response", async () => {
+    const partialSql: string[] = [];
+    const fetchModel = vi.fn(
+      async (
+        _input: string,
+        _init: { method: "POST"; headers: Record<string, string>; body: string },
+      ) => ({
+        ok: true,
+        body: streamFromText(
+          [
+            'data: {"choices":[{"delta":{"content":"select id"}}]}',
+            'data: {"choices":[{"delta":{"content":" from orders where created_at >= current_date - interval 30 day"}}]}',
+            "data: [DONE]",
+            "",
+          ].join("\n\n"),
+        ),
+      }),
+    );
+
+    await expect(
+      modifySqlFromIntent({
+        modificationIntent: "Add a date filter for the last 30 days",
+        currentSql: "select id from orders",
+        session,
+        catalog,
+        configuration: {
+          baseUrl: "https://ai.example.test/v1",
+          model: "glimpse-sql",
+          temperature: 0.2,
+          maxTokens: 1000,
+        },
+        apiKey: "sk-ai-api-key",
+        fetchModel,
+        onPartialSql: (sql) => partialSql.push(sql),
+      }),
+    ).resolves.toBe(
+      "select id from orders where created_at >= current_date - interval 30 day",
+    );
+
+    expect(partialSql).toEqual([
+      "select id",
+      "select id from orders where created_at >= current_date - interval 30 day",
+    ]);
+    const [, requestInit] = fetchModel.mock.calls[0];
+    expect(String(requestInit.body)).toContain('"stream":true');
+    expect(String(requestInit.body)).toContain("select id from orders");
     expect(String(requestInit.body)).not.toContain("sk-ai-api-key");
     expect(String(requestInit.body)).not.toContain("sensitive-row-value");
   });

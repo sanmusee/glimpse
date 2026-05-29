@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import type { GenerateSqlFromQueryNeedInput } from "./sqlGeneration";
+import type { GenerateSqlFromQueryNeedInput, ModifySqlFromIntentInput } from "./sqlGeneration";
 import {
   AI_PROVIDER_API_KEY_SECRET_ID,
   createInMemoryLocalPersistence,
@@ -667,6 +667,83 @@ describe("Glimpse app shell", () => {
     expect(sqlGenerator).toHaveBeenCalledWith(
       expect.objectContaining({
         queryNeed: "Count orders by customer",
+        apiKey: "sk-test-secret",
+        session: expect.objectContaining({
+          candidateTables: [{ name: "orders", reason: "Added by user" }],
+        }),
+      }),
+    );
+  });
+
+  it("modifies the current SQL from a natural-language intent, streams it into the editor, and stores the Query Session history", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      aiConfiguration: {
+        baseUrl: "https://ai.example.test/v1",
+        model: "glimpse-sql",
+        temperature: 0.2,
+        maxTokens: 1000,
+      },
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => warehouseCatalogWithCustomers,
+    });
+    await localPersistence.secrets.setSecret(AI_PROVIDER_API_KEY_SECRET_ID, "sk-test-secret");
+    const sqlModifier = vi.fn(async ({ onPartialSql }: ModifySqlFromIntentInput) => {
+      onPartialSql?.("select id from orders");
+      onPartialSql?.("select id from orders where created_at >= current_date - interval 30 day");
+
+      return "select id from orders where created_at >= current_date - interval 30 day";
+    });
+
+    render(<App localPersistence={localPersistence} sqlModifier={sqlModifier} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    expect(await screen.findByText("customers")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
+    const sqlEditor = await screen.findByRole("textbox", { name: /sql draft/i });
+    fireEvent.change(sqlEditor, { target: { value: "select id from orders" } });
+    fireEvent.change(screen.getByRole("combobox", { name: /add candidate table/i }), {
+      target: { value: "orders" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^add candidate table$/i }));
+    expect(await screen.findByRole("button", { name: /remove orders/i })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: /modification intent/i }), {
+      target: { value: "Add a date filter for the last 30 days" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /modify current sql/i }));
+
+    await waitFor(() =>
+      expect(sqlEditor).toHaveValue(
+        "select id from orders where created_at >= current_date - interval 30 day",
+      ),
+    );
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      sqlDraft: "select id from orders where created_at >= current_date - interval 30 day",
+      aiConversationHistory: [
+        expect.objectContaining({
+          role: "user",
+          content: "Add a date filter for the last 30 days",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          content: "select id from orders where created_at >= current_date - interval 30 day",
+        }),
+      ],
+    });
+    expect(sqlModifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modificationIntent: "Add a date filter for the last 30 days",
+        currentSql: "select id from orders",
         apiKey: "sk-test-secret",
         session: expect.objectContaining({
           candidateTables: [{ name: "orders", reason: "Added by user" }],

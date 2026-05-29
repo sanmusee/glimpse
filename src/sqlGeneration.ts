@@ -10,6 +10,13 @@ export interface SqlGenerationRequestInput {
   catalog: DatabaseCatalogSnapshot;
 }
 
+export interface SqlModificationRequestInput {
+  modificationIntent: string;
+  currentSql: string;
+  session: QuerySession;
+  catalog: DatabaseCatalogSnapshot;
+}
+
 export interface SqlGenerationModelRequest {
   messages: Array<{ role: "system" | "user"; content: string }>;
 }
@@ -35,31 +42,19 @@ export interface GenerateSqlFromQueryNeedInput extends SqlGenerationRequestInput
   onPartialSql?: (sql: string) => void;
 }
 
+export interface ModifySqlFromIntentInput extends SqlModificationRequestInput {
+  configuration: GlobalAiConfiguration;
+  apiKey: string;
+  fetchModel?: FetchLike;
+  onPartialSql?: (sql: string) => void;
+}
+
 export function buildSqlGenerationRequest({
   queryNeed,
   session,
   catalog,
 }: SqlGenerationRequestInput): SqlGenerationModelRequest {
-  const candidateTableNames = new Set(session.candidateTables.map((table) => table.name));
-  const catalogContext = {
-    database: catalog.database,
-    tables: catalog.tables
-      .filter((table) => candidateTableNames.has(table.name))
-      .map((table) => ({
-        name: table.name,
-        comment: table.comment,
-        columns: table.columns.map((column) => ({
-          name: column.name,
-          dataType: column.dataType,
-          nullable: column.nullable,
-          defaultValue: column.defaultValue,
-          comment: column.comment,
-          isPrimaryKey: column.isPrimaryKey,
-        })),
-        indexes: table.indexes,
-        createTableDdl: table.createTableDdl,
-      })),
-  };
+  const catalogContext = buildCandidateCatalogContext(session, catalog);
 
   return {
     messages: [
@@ -84,6 +79,38 @@ export function buildSqlGenerationRequest({
   };
 }
 
+export function buildSqlModificationRequest({
+  modificationIntent,
+  currentSql,
+  session,
+  catalog,
+}: SqlModificationRequestInput): SqlGenerationModelRequest {
+  const catalogContext = buildCandidateCatalogContext(session, catalog);
+
+  return {
+    messages: [
+      {
+        role: "system",
+        content:
+          "Modify the existing SQL according to the user's intent. Return only the revised SQL text, with no explanation or markdown fences. Use the current SQL as the starting point and preserve its intent unless the user asks to change it. Use only the provided default schema and candidate table context.",
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          modificationIntent,
+          currentSql,
+          querySession: {
+            id: session.id,
+            defaultDatabase: session.defaultDatabase,
+            candidateTables: session.candidateTables,
+          },
+          defaultSchemaCatalog: catalogContext,
+        }),
+      },
+    ],
+  };
+}
+
 export async function generateSqlFromQueryNeed({
   queryNeed,
   session,
@@ -94,6 +121,58 @@ export async function generateSqlFromQueryNeed({
   onPartialSql,
 }: GenerateSqlFromQueryNeedInput): Promise<string> {
   const request = buildSqlGenerationRequest({ queryNeed, session, catalog });
+  return streamSqlCompletion({
+    request,
+    configuration,
+    apiKey,
+    fetchModel,
+    onPartialSql,
+    failureLabel: "SQL generation",
+  });
+}
+
+export async function modifySqlFromIntent({
+  modificationIntent,
+  currentSql,
+  session,
+  catalog,
+  configuration,
+  apiKey,
+  fetchModel = fetch,
+  onPartialSql,
+}: ModifySqlFromIntentInput): Promise<string> {
+  const request = buildSqlModificationRequest({
+    modificationIntent,
+    currentSql,
+    session,
+    catalog,
+  });
+
+  return streamSqlCompletion({
+    request,
+    configuration,
+    apiKey,
+    fetchModel,
+    onPartialSql,
+    failureLabel: "SQL modification",
+  });
+}
+
+async function streamSqlCompletion({
+  request,
+  configuration,
+  apiKey,
+  fetchModel,
+  onPartialSql,
+  failureLabel,
+}: {
+  request: SqlGenerationModelRequest;
+  configuration: GlobalAiConfiguration;
+  apiKey: string;
+  fetchModel: FetchLike;
+  onPartialSql?: (sql: string) => void;
+  failureLabel: string;
+}): Promise<string> {
   const response = await fetchModel(`${configuration.baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers: {
@@ -111,11 +190,11 @@ export async function generateSqlFromQueryNeed({
 
   if (!response.ok) {
     const details = response.text ? await response.text() : "unknown error";
-    throw new Error(`SQL generation failed with HTTP ${response.status ?? "error"}: ${details}`);
+    throw new Error(`${failureLabel} failed with HTTP ${response.status ?? "error"}: ${details}`);
   }
 
   if (!response.body) {
-    throw new Error("SQL generation failed: streaming response body was empty");
+    throw new Error(`${failureLabel} failed: streaming response body was empty`);
   }
 
   const reader = response.body.getReader();
@@ -157,4 +236,31 @@ export async function generateSqlFromQueryNeed({
   }
 
   return sql;
+}
+
+function buildCandidateCatalogContext(
+  session: QuerySession,
+  catalog: DatabaseCatalogSnapshot,
+) {
+  const candidateTableNames = new Set(session.candidateTables.map((table) => table.name));
+
+  return {
+    database: catalog.database,
+    tables: catalog.tables
+      .filter((table) => candidateTableNames.has(table.name))
+      .map((table) => ({
+        name: table.name,
+        comment: table.comment,
+        columns: table.columns.map((column) => ({
+          name: column.name,
+          dataType: column.dataType,
+          nullable: column.nullable,
+          defaultValue: column.defaultValue,
+          comment: column.comment,
+          isPrimaryKey: column.isPrimaryKey,
+        })),
+        indexes: table.indexes,
+        createTableDdl: table.createTableDdl,
+      })),
+  };
 }

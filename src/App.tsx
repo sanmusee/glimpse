@@ -7,6 +7,8 @@ import {
 import {
   generateSqlFromQueryNeed,
   type GenerateSqlFromQueryNeedInput,
+  modifySqlFromIntent,
+  type ModifySqlFromIntentInput,
 } from "./sqlGeneration";
 import {
   runStreamingAiProviderTest,
@@ -35,6 +37,7 @@ interface AppProps {
     input: DiscoverCandidateTablesInput,
   ) => Promise<CandidateTable[]>;
   sqlGenerator?: (input: GenerateSqlFromQueryNeedInput) => Promise<string>;
+  sqlModifier?: (input: ModifySqlFromIntentInput) => Promise<string>;
 }
 
 interface AiConfigurationFormState {
@@ -67,6 +70,7 @@ export function App({
   aiProviderTester = runStreamingAiProviderTest,
   candidateTableDiscoverer = discoverCandidateTables,
   sqlGenerator = generateSqlFromQueryNeed,
+  sqlModifier = modifySqlFromIntent,
 }: AppProps) {
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [databaseConnections, setDatabaseConnections] = useState<DatabaseConnection[]>([]);
@@ -83,6 +87,7 @@ export function App({
   const [aiConfigurationStatus, setAiConfigurationStatus] = useState("Not configured");
   const [aiProviderTestStatus, setAiProviderTestStatus] = useState("");
   const [queryNeed, setQueryNeed] = useState("");
+  const [modificationIntent, setModificationIntent] = useState("");
   const [candidateTableStatus, setCandidateTableStatus] = useState("");
   const [sqlGenerationStatus, setSqlGenerationStatus] = useState("");
   const [hasGeneratedSql, setHasGeneratedSql] = useState(false);
@@ -454,6 +459,95 @@ export function App({
     }
   };
 
+  const runSqlModification = async () => {
+    if (!currentQuerySession || !activeCatalog) {
+      setSqlGenerationStatus("Open a catalog and create a Query Session first");
+      return;
+    }
+
+    const trimmedModificationIntent = modificationIntent.trim();
+    if (!trimmedModificationIntent) {
+      setSqlGenerationStatus("Modification intent is required");
+      return;
+    }
+
+    const currentSql = currentQuerySession.sqlDraft.trim();
+    if (!currentSql) {
+      setSqlGenerationStatus("Current SQL is required before modification");
+      return;
+    }
+
+    const configuration: GlobalAiConfiguration = {
+      baseUrl: aiConfigurationForm.baseUrl.trim(),
+      model: aiConfigurationForm.model.trim(),
+      temperature: Number(aiConfigurationForm.temperature),
+      maxTokens: Number(aiConfigurationForm.maxTokens),
+    };
+    const apiKey =
+      aiConfigurationForm.apiKey ||
+      (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID));
+
+    if (!configuration.baseUrl || !configuration.model || !apiKey) {
+      setSqlGenerationStatus("AI configuration and API key are required");
+      return;
+    }
+
+    const modificationSession = currentQuerySession;
+    let streamedSql = "";
+    setHasGeneratedSql(false);
+    setSqlGenerationStatus("Modifying SQL");
+
+    try {
+      const modifiedSql = await sqlModifier({
+        modificationIntent: trimmedModificationIntent,
+        currentSql,
+        session: modificationSession,
+        catalog: activeCatalog,
+        configuration,
+        apiKey,
+        onPartialSql: (partialSql) => {
+          streamedSql = partialSql;
+          updateSqlDraftInState(modificationSession.id, partialSql);
+        },
+      });
+      const finalSql = modifiedSql || streamedSql;
+      updateSqlDraftInState(modificationSession.id, finalSql);
+
+      const savedDraftSession = await localPersistence.querySessions.saveSqlDraft(
+        modificationSession.id,
+        finalSql,
+      );
+      const savedConversationSession =
+        await localPersistence.querySessions.saveAiConversationHistory(
+          modificationSession.id,
+          [
+            ...modificationSession.aiConversationHistory,
+            {
+              id: createUiLocalId(),
+              role: "user",
+              content: trimmedModificationIntent,
+              createdAt: new Date().toISOString(),
+            },
+            {
+              id: createUiLocalId(),
+              role: "assistant",
+              content: finalSql,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        );
+
+      updateCurrentQuerySession({
+        ...savedConversationSession,
+        sqlDraft: savedDraftSession.sqlDraft,
+      });
+      setHasGeneratedSql(true);
+      setSqlGenerationStatus("SQL modified. Review it before manual execution.");
+    } catch (error) {
+      setSqlGenerationStatus(formatSqlGenerationError(error));
+    }
+  };
+
   const addCandidateTable = async () => {
     if (!selectedCandidateTableName || !currentQuerySession) {
       return;
@@ -716,6 +810,15 @@ export function App({
               placeholder="Find monthly revenue by customer segment"
             />
           </label>
+          <label className="field">
+            <span>Modification intent</span>
+            <textarea
+              className="query-need-input"
+              value={modificationIntent}
+              onChange={(event) => setModificationIntent(event.target.value)}
+              placeholder="Add a filter for the last 30 days"
+            />
+          </label>
           <button
             className="primary-button"
             type="button"
@@ -734,6 +837,14 @@ export function App({
             disabled={!currentQuerySession || !activeCatalog}
           >
             Generate SQL
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={runSqlModification}
+            disabled={!currentQuerySession || !activeCatalog}
+          >
+            Modify current SQL
           </button>
           {sqlGenerationStatus ? (
             <div className="status-line">{sqlGenerationStatus}</div>
