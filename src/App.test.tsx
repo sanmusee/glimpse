@@ -2,7 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import {
+  AI_PROVIDER_API_KEY_SECRET_ID,
   createInMemoryLocalPersistence,
+  type CandidateTable,
   type DatabaseCatalogSnapshot,
 } from "./platform/localPersistence";
 
@@ -38,6 +40,29 @@ const warehouseCatalog: DatabaseCatalogSnapshot = {
       ],
       createTableDdl:
         "CREATE TABLE `orders` (`id` bigint NOT NULL, `customer_id` bigint NOT NULL)",
+    },
+  ],
+};
+
+const warehouseCatalogWithCustomers: DatabaseCatalogSnapshot = {
+  ...warehouseCatalog,
+  tables: [
+    ...warehouseCatalog.tables,
+    {
+      name: "customers",
+      comment: "Customer profile",
+      columns: [
+        {
+          name: "id",
+          dataType: "bigint",
+          nullable: false,
+          defaultValue: null,
+          comment: "",
+          isPrimaryKey: true,
+        },
+      ],
+      indexes: [{ name: "PRIMARY", kind: "primary", columns: ["id"] }],
+      createTableDdl: "CREATE TABLE `customers` (`id` bigint NOT NULL)",
     },
   ],
 };
@@ -487,6 +512,82 @@ describe("Glimpse app shell", () => {
     expect(await screen.findByText(/warehouse \/ analytics/i)).toBeInTheDocument();
     expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue(
       "select count(*) from orders",
+    );
+  });
+
+  it("discovers candidate tables from a natural-language query and keeps the Query Session context adjustable", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      aiConfiguration: {
+        baseUrl: "https://ai.example.test/v1",
+        model: "glimpse-sql",
+        temperature: 0.2,
+        maxTokens: 1000,
+      },
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => warehouseCatalogWithCustomers,
+    });
+    await localPersistence.secrets.setSecret(AI_PROVIDER_API_KEY_SECRET_ID, "sk-test-secret");
+    const candidateTableDiscoverer = vi.fn().mockResolvedValue([
+      { name: "orders", reason: "Contains order facts" },
+    ] satisfies CandidateTable[]);
+
+    render(
+      <App
+        localPersistence={localPersistence}
+        candidateTableDiscoverer={candidateTableDiscoverer}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    expect(await screen.findByText("customers")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /query need/i }), {
+      target: { value: "Find monthly order totals" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /discover candidate tables/i }));
+
+    const candidateTableSet = await screen.findByRole("region", {
+      name: /candidate table set/i,
+    });
+    expect(candidateTableSet).toHaveTextContent("orders");
+    expect(candidateTableSet).toHaveTextContent("Contains order facts");
+    expect(screen.getByRole("button", { name: /remove orders/i })).toBeInTheDocument();
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      candidateTables: [{ name: "orders", reason: "Contains order facts" }],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /remove orders/i }));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /remove orders/i })).not.toBeInTheDocument(),
+    );
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      candidateTables: [],
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: /add candidate table/i }), {
+      target: { value: "customers" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^add candidate table$/i }));
+
+    expect(await screen.findByRole("button", { name: /remove customers/i })).toBeInTheDocument();
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      candidateTables: [{ name: "customers", reason: "Added by user" }],
+    });
+    expect(candidateTableDiscoverer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryNeed: "Find monthly order totals",
+        apiKey: "sk-test-secret",
+      }),
     );
   });
 });

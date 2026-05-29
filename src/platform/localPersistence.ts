@@ -83,6 +83,11 @@ export interface DatabaseCatalogSnapshot {
   tables: DatabaseCatalogTable[];
 }
 
+export interface CandidateTable {
+  name: string;
+  reason: string;
+}
+
 export interface DatabaseConnectionStore {
   listDatabaseConnections(): Promise<DatabaseConnection[]>;
   saveDatabaseConnection(input: DatabaseConnectionInput): Promise<DatabaseConnection>;
@@ -102,6 +107,7 @@ export interface QuerySession {
   connectionName: string;
   defaultDatabase: string;
   sqlDraft: string;
+  candidateTables: CandidateTable[];
   aiConversationHistory: AiConversationEntry[];
   executionResultMetadata: ExecutionResultMetadata[];
   createdAt: string;
@@ -129,6 +135,10 @@ export interface QuerySessionStore {
   createQuerySession(input: { databaseConnectionId: string }): Promise<QuerySession>;
   getRestoredQuerySession(): Promise<QuerySession | null>;
   saveSqlDraft(sessionId: string, sqlDraft: string): Promise<QuerySession>;
+  saveCandidateTables(
+    sessionId: string,
+    candidateTables: CandidateTable[],
+  ): Promise<QuerySession>;
   saveAiConversationHistory(
     sessionId: string,
     entries: AiConversationEntry[],
@@ -294,6 +304,7 @@ export function createInMemoryLocalPersistence(initial?: {
           connectionName: databaseConnection.name,
           defaultDatabase: databaseConnection.defaultDatabase,
           sqlDraft: "",
+          candidateTables: [],
           aiConversationHistory: [],
           executionResultMetadata: [],
           createdAt: now,
@@ -342,6 +353,23 @@ export function createInMemoryLocalPersistence(initial?: {
         const updatedSession = {
           ...session,
           aiConversationHistory: entries,
+          updatedAt: new Date().toISOString(),
+        };
+        querySessions.set(sessionId, updatedSession);
+        currentQuerySessionId = sessionId;
+
+        return updatedSession;
+      },
+      async saveCandidateTables(sessionId, candidateTables) {
+        const session = querySessions.get(sessionId);
+
+        if (!session) {
+          throw new Error("Query Session was not found");
+        }
+
+        const updatedSession = {
+          ...session,
+          candidateTables,
           updatedAt: new Date().toISOString(),
         };
         querySessions.set(sessionId, updatedSession);
@@ -478,6 +506,13 @@ export function createTauriLocalPersistence(invoke: TauriInvoke = tauriInvoke): 
         const session = await invoke("save_query_session_ai_conversation_history", {
           sessionId,
           entries,
+        });
+        return session as QuerySession;
+      },
+      async saveCandidateTables(sessionId, candidateTables) {
+        const session = await invoke("save_query_session_candidate_tables", {
+          sessionId,
+          candidateTables,
         });
         return session as QuerySession;
       },

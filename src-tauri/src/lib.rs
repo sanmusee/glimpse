@@ -110,6 +110,13 @@ struct AiConversationEntry {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CandidateTable {
+    name: String,
+    reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ExecutionResultMetadata {
     id: String,
     sql: String,
@@ -127,6 +134,7 @@ struct QuerySessionRecord {
     connection_name: String,
     default_database: String,
     sql_draft: String,
+    candidate_tables: Vec<CandidateTable>,
     ai_conversation_history: Vec<AiConversationEntry>,
     execution_result_metadata: Vec<ExecutionResultMetadata>,
     created_at: String,
@@ -221,6 +229,19 @@ fn open_local_store(app: &tauri::AppHandle) -> Result<Connection, String> {
             [],
         )
         .map_err(|error| format!("failed to prepare query sessions table: {error}"))?;
+
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS query_session_candidate_tables (
+                session_id TEXT PRIMARY KEY,
+                candidate_tables_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .map_err(|error| {
+            format!("failed to prepare query session candidate tables table: {error}")
+        })?;
 
     connection
         .execute(
@@ -514,12 +535,14 @@ fn read_query_session_by_id(
                 COALESCE(dc.name, 'Deleted connection') AS connection_name,
                 qs.default_database,
                 qs.sql_draft,
+                COALESCE(candidate_tables.candidate_tables_json, '[]') AS candidate_tables,
                 COALESCE(ai.entries_json, '[]') AS ai_conversation_history,
                 COALESCE(metadata.metadata_json, '[]') AS execution_result_metadata,
                 qs.created_at,
                 qs.updated_at
              FROM query_sessions qs
              LEFT JOIN database_connections dc ON dc.id = qs.database_connection_id
+             LEFT JOIN query_session_candidate_tables candidate_tables ON candidate_tables.session_id = qs.id
              LEFT JOIN query_session_ai_conversation_history ai ON ai.session_id = qs.id
              LEFT JOIN query_session_execution_metadata metadata ON metadata.session_id = qs.id
              WHERE qs.id = ?1",
@@ -531,22 +554,29 @@ fn read_query_session_by_id(
                     connection_name: row.get(2)?,
                     default_database: row.get(3)?,
                     sql_draft: row.get(4)?,
-                    ai_conversation_history: parse_json_array(row.get(5)?).map_err(|error| {
+                    candidate_tables: parse_json_array(row.get(5)?).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             5,
                             rusqlite::types::Type::Text,
                             error.into(),
                         )
                     })?,
-                    execution_result_metadata: parse_json_array(row.get(6)?).map_err(|error| {
+                    ai_conversation_history: parse_json_array(row.get(6)?).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             6,
                             rusqlite::types::Type::Text,
                             error.into(),
                         )
                     })?,
-                    created_at: row.get(7)?,
-                    updated_at: row.get(8)?,
+                    execution_result_metadata: parse_json_array(row.get(7)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            7,
+                            rusqlite::types::Type::Text,
+                            error.into(),
+                        )
+                    })?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
                 })
             },
         )
@@ -912,12 +942,14 @@ fn list_query_sessions(app: tauri::AppHandle) -> Result<Vec<QuerySessionRecord>,
                 COALESCE(dc.name, 'Deleted connection') AS connection_name,
                 qs.default_database,
                 qs.sql_draft,
+                COALESCE(candidate_tables.candidate_tables_json, '[]') AS candidate_tables,
                 COALESCE(ai.entries_json, '[]') AS ai_conversation_history,
                 COALESCE(metadata.metadata_json, '[]') AS execution_result_metadata,
                 qs.created_at,
                 qs.updated_at
              FROM query_sessions qs
              LEFT JOIN database_connections dc ON dc.id = qs.database_connection_id
+             LEFT JOIN query_session_candidate_tables candidate_tables ON candidate_tables.session_id = qs.id
              LEFT JOIN query_session_ai_conversation_history ai ON ai.session_id = qs.id
              LEFT JOIN query_session_execution_metadata metadata ON metadata.session_id = qs.id
              ORDER BY qs.last_opened_at DESC, qs.updated_at DESC",
@@ -932,22 +964,29 @@ fn list_query_sessions(app: tauri::AppHandle) -> Result<Vec<QuerySessionRecord>,
                 connection_name: row.get(2)?,
                 default_database: row.get(3)?,
                 sql_draft: row.get(4)?,
-                ai_conversation_history: parse_json_array(row.get(5)?).map_err(|error| {
+                candidate_tables: parse_json_array(row.get(5)?).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         5,
                         rusqlite::types::Type::Text,
                         error.into(),
                     )
                 })?,
-                execution_result_metadata: parse_json_array(row.get(6)?).map_err(|error| {
+                ai_conversation_history: parse_json_array(row.get(6)?).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         6,
                         rusqlite::types::Type::Text,
                         error.into(),
                     )
                 })?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                execution_result_metadata: parse_json_array(row.get(7)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })
         .map_err(|error| format!("failed to read query sessions: {error}"))?;
@@ -1080,6 +1119,33 @@ fn save_query_session_ai_conversation_history(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+fn save_query_session_candidate_tables(
+    app: tauri::AppHandle,
+    session_id: String,
+    candidate_tables: Vec<CandidateTable>,
+) -> Result<QuerySessionRecord, String> {
+    let connection = open_local_store(&app)?;
+    let candidate_tables_json = serde_json::to_string(&candidate_tables)
+        .map_err(|error| format!("failed to serialize candidate tables: {error}"))?;
+
+    connection
+        .execute(
+            "INSERT INTO query_session_candidate_tables
+                (session_id, candidate_tables_json, updated_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(session_id) DO UPDATE SET
+                candidate_tables_json = excluded.candidate_tables_json,
+                updated_at = CURRENT_TIMESTAMP",
+            params![session_id, candidate_tables_json],
+        )
+        .map_err(|error| format!("failed to save candidate tables: {error}"))?;
+
+    set_current_query_session(&connection, &session_id)?;
+    read_query_session_by_id(&connection, &session_id)?
+        .ok_or_else(|| "query session was not found".to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn save_query_session_execution_metadata(
     app: tauri::AppHandle,
     session_id: String,
@@ -1140,6 +1206,7 @@ pub fn run() {
             get_restored_query_session,
             save_query_session_sql_draft,
             save_query_session_ai_conversation_history,
+            save_query_session_candidate_tables,
             save_query_session_execution_metadata
         ])
         .run(tauri::generate_context!())
