@@ -1147,7 +1147,7 @@ export function App({
   };
 
   return (
-    <main aria-label="Glimpse V0.2 workbench" className="app-shell">
+    <main aria-label="Glimpse V0.2 workbench" className="app-shell" data-page-scroll="disabled">
       <header className="workbench-toolbar" role="toolbar" aria-label="V0.2 workbench toolbar">
         <button type="button" onClick={() => setActiveDialog("dataSources")}>
           Data Source Management
@@ -1172,7 +1172,11 @@ export function App({
         </button>
       </header>
 
-      <section className="sidebar sidebar-left" aria-label="Database Connection Tree">
+      <section
+        className="sidebar sidebar-left"
+        aria-label="Database Connection Tree"
+        data-testid="workbench-scroll-region"
+      >
         <header className="brand-bar">
           <div className="brand-mark">G</div>
           <div>
@@ -1296,7 +1300,11 @@ export function App({
       </section>
 
       <section className="workspace">
-        <section aria-label="SQL editor" className="panel editor-panel">
+        <section
+          aria-label="SQL editor"
+          className="panel editor-panel"
+          data-testid="workbench-scroll-region"
+        >
           <div className="panel-title">SQL Draft</div>
           <textarea
             aria-label="SQL Draft"
@@ -1326,7 +1334,11 @@ export function App({
           </div>
         </section>
 
-        <section aria-label="Active Console Result Set" className="panel results-panel">
+        <section
+          aria-label="Active Console Result Set"
+          className="panel results-panel"
+          data-testid="workbench-scroll-region"
+        >
           <div className="panel-title">Result</div>
           {activeConsoleExecutionState.warnings.length ? (
             <div className="execution-warning" role="status">
@@ -1385,7 +1397,11 @@ export function App({
         </section>
       </section>
 
-      <section className="sidebar sidebar-right" aria-label="Right-side Content Switcher">
+      <section
+        className="sidebar sidebar-right"
+        aria-label="Right-side Content Switcher"
+        data-testid="workbench-scroll-region"
+      >
         <div className="right-side-switcher" role="tablist" aria-label="Right-side views">
           <button
             type="button"
@@ -1471,11 +1487,9 @@ export function App({
             {aiConversationStatus ? (
               <div className="status-line">{aiConversationStatus}</div>
             ) : null}
-          </section>
-        )}
 
-        <section aria-label="AI assistant" className="panel">
-          <div className="panel-title">AI Assistant</div>
+        <section aria-label="AI SQL commands" className="panel">
+          <div className="panel-title">AI SQL Commands</div>
           <label className="field">
             <span>Query need</span>
             <textarea
@@ -1603,23 +1617,6 @@ export function App({
           </form>
         </section>
 
-        <section aria-label="AI conversation history" className="panel">
-          <div className="panel-title">AI Conversation History</div>
-          {currentQuerySession?.aiConversationHistory.length ? (
-            <div className="conversation-list">
-              {currentQuerySession.aiConversationHistory.map((entry) => (
-                <article className="conversation-row" key={entry.id}>
-                  <strong>{entry.role === "user" ? "User" : "Assistant"}</strong>
-                  <span>{entry.createdAt}</span>
-                  <p>{entry.content}</p>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <div className="placeholder-row">No AI conversation yet</div>
-          )}
-        </section>
-
         <section className="panel">
           <section aria-label="Database catalog" className="catalog-panel">
             <div className="panel-title">Database Catalog</div>
@@ -1737,6 +1734,8 @@ export function App({
             </button>
           </div>
         </section>
+          </section>
+        )}
       </section>
 
       {activeDialog === "dataSources" ? (

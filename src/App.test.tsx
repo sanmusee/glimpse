@@ -82,6 +82,13 @@ describe("Glimpse app shell", () => {
     document.documentElement.removeAttribute("data-theme");
   });
 
+  const openAiConversationView = () => {
+    const rightSide = screen.getByRole("region", { name: /right-side content switcher/i });
+    fireEvent.click(within(rightSide).getByRole("tab", { name: /ai conversation view/i }));
+
+    return within(rightSide).getByRole("region", { name: /ai conversation view/i });
+  };
+
   it("opens into the V0.2 workbench shell with only confirmed toolbar entry points", () => {
     render(<App localPersistence={createInMemoryLocalPersistence()} />);
 
@@ -110,6 +117,32 @@ describe("Glimpse app shell", () => {
     expect(workbench).not.toHaveTextContent("Theme preference");
   });
 
+  it("keeps normal V0.2 layout scrolling inside the workbench regions", () => {
+    render(<App localPersistence={createInMemoryLocalPersistence()} />);
+
+    const workbench = screen.getByRole("main", { name: /glimpse v0\.2 workbench/i });
+    expect(workbench).toHaveAttribute("data-page-scroll", "disabled");
+
+    const scrollRegions = within(workbench)
+      .getAllByTestId("workbench-scroll-region")
+      .map((region) => region.getAttribute("aria-label"));
+    expect(scrollRegions).toHaveLength(4);
+    expect(scrollRegions).toEqual(expect.arrayContaining([
+      "Database Connection Tree",
+      "SQL editor",
+      "Right-side Content Switcher",
+      "Active Console Result Set",
+    ]));
+
+    const rightSide = screen.getByRole("region", { name: /right-side content switcher/i });
+    expect(within(rightSide).queryByRole("region", { name: /ai assistant/i }))
+      .not.toBeInTheDocument();
+    expect(within(rightSide).queryByRole("region", { name: /database catalog/i }))
+      .not.toBeInTheDocument();
+    expect(within(rightSide).queryByRole("region", { name: /candidate table set/i }))
+      .not.toBeInTheDocument();
+  });
+
   it("opens directly into the V0.2 SQL workbench with setup empty states", () => {
     render(<App localPersistence={createInMemoryLocalPersistence()} />);
 
@@ -122,8 +155,8 @@ describe("Glimpse app shell", () => {
       .toBeInTheDocument();
     expect(screen.getByRole("region", { name: /right-side content switcher/i }))
       .toBeInTheDocument();
-    expect(screen.getByRole("region", { name: /ai assistant/i })).toBeInTheDocument();
-    expect(screen.getByText(/configure global ai provider/i)).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: /ai assistant/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/configure global ai provider/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /data source management/i })).toBeInTheDocument();
     expect(screen.getByText(/no saved connections yet/i)).toBeInTheDocument();
   });
@@ -355,11 +388,20 @@ describe("Glimpse app shell", () => {
       /sql autocomplete/i,
       /team sharing/i,
       /prompt template management/i,
+      /connection model provider/i,
+      /model provider per connection/i,
+      /result tab/i,
+      /results tab/i,
     ].forEach((entryPoint) => {
       expect(workbench).not.toHaveTextContent(entryPoint);
     });
     expect(screen.queryByRole("button", { name: /csv/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /export/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /autocomplete/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /data source management/i }));
+    const dataSourceDialog = screen.getByRole("dialog", { name: /data source management/i });
+    expect(dataSourceDialog).not.toHaveTextContent(/model provider/i);
   });
 
   it.each(["light", "dark", "system"] as const)(
@@ -671,6 +713,7 @@ describe("Glimpse app shell", () => {
 
     expect(await screen.findByText("Warehouse")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /open catalog warehouse/i }));
+    openAiConversationView();
 
     const catalogRegion = await screen.findByRole("region", { name: /database catalog/i });
     expect(catalogRegion).toHaveTextContent("warehouse");
@@ -728,6 +771,7 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    openAiConversationView();
     const catalogRegion = screen.getByRole("region", { name: /database catalog/i });
     expect(await within(catalogRegion).findByText("orders")).toBeInTheDocument();
     expect(screen.queryByText("customers")).not.toBeInTheDocument();
@@ -778,6 +822,7 @@ describe("Glimpse app shell", () => {
   it("saves and restores the global AI provider configuration", async () => {
     const localPersistence = createInMemoryLocalPersistence();
     const { unmount } = render(<App localPersistence={localPersistence} />);
+    openAiConversationView();
 
     fireEvent.change(screen.getByLabelText(/base url/i), {
       target: { value: "https://api.example.test/v1" },
@@ -801,6 +846,7 @@ describe("Glimpse app shell", () => {
 
     unmount();
     render(<App localPersistence={localPersistence} />);
+    openAiConversationView();
 
     await waitFor(() =>
       expect(screen.getByLabelText(/base url/i)).toHaveValue("https://api.example.test/v1"),
@@ -819,6 +865,7 @@ describe("Glimpse app shell", () => {
       .mockResolvedValueOnce({ ok: true, content: "Streaming AI response" });
 
     render(<App localPersistence={localPersistence} aiProviderTester={aiProviderTester} />);
+    openAiConversationView();
 
     fireEvent.change(screen.getByLabelText(/base url/i), {
       target: { value: "https://api.example.test/v1" },
@@ -1520,11 +1567,12 @@ describe("Glimpse app shell", () => {
     expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue(
       "select id, private_value from orders limit 1",
     );
-    expect(screen.getByRole("region", { name: /candidate table set/i }))
+    const aiConversationView = openAiConversationView();
+    expect(within(aiConversationView).getByRole("region", { name: /candidate table set/i }))
       .toHaveTextContent("Contains private order facts");
-    expect(screen.getByRole("region", { name: /ai conversation history/i }))
+    expect(within(aiConversationView).getByRole("region", { name: /ai conversation history/i }))
       .toHaveTextContent("Show one private order");
-    expect(screen.getByRole("region", { name: /ai conversation history/i }))
+    expect(within(aiConversationView).getByRole("region", { name: /ai conversation history/i }))
       .toHaveTextContent("select id, private_value from orders limit 1");
     expect(screen.getByLabelText(/execution result metadata/i))
       .toHaveTextContent("Succeeded: 1 rows");
@@ -1620,6 +1668,7 @@ describe("Glimpse app shell", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    openAiConversationView();
     expect(
       await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
         "customers",
@@ -1711,6 +1760,7 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} sqlGenerator={sqlGenerator} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    openAiConversationView();
     expect(
       await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
         "customers",
@@ -1811,6 +1861,7 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} sqlGenerator={sqlGenerator} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    openAiConversationView();
     expect(
       await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
         "customers",
@@ -1868,6 +1919,7 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} sqlModifier={sqlModifier} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    openAiConversationView();
     expect(
       await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
         "customers",
@@ -2252,10 +2304,10 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} sqlRepairer={sqlRepairer} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    openAiConversationView();
+    const catalogRegion = await screen.findByRole("region", { name: /database catalog/i });
     expect(
-      await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
-        "customers",
-      ),
+      await within(catalogRegion).findByText("customers"),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
     const sqlEditor = await screen.findByRole("textbox", { name: /sql draft/i });
