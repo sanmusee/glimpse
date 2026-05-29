@@ -1,9 +1,21 @@
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::process::Command;
 use std::{fs, path::PathBuf};
 use tauri::Manager;
 
 const THEME_PREFERENCE_KEY: &str = "theme_preference";
 const DEFAULT_THEME_PREFERENCE: &str = "system";
+const KEYCHAIN_SERVICE: &str = "com.glimpse.app";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GlobalAiConfiguration {
+    base_url: String,
+    model: String,
+    temperature: f64,
+    max_tokens: i64,
+}
 
 fn is_theme_preference(value: &str) -> bool {
     matches!(value, "system" | "light" | "dark")
@@ -35,6 +47,20 @@ fn open_local_store(app: &tauri::AppHandle) -> Result<Connection, String> {
             [],
         )
         .map_err(|error| format!("failed to prepare app settings table: {error}"))?;
+
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS global_ai_configuration (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                base_url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                max_tokens INTEGER NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .map_err(|error| format!("failed to prepare global AI configuration table: {error}"))?;
 
     Ok(connection)
 }
@@ -78,18 +104,149 @@ fn set_theme_preference(app: tauri::AppHandle, theme_preference: String) -> Resu
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn get_secret(_secret_id: String) -> Result<Option<String>, String> {
-    Err("Keychain secret store is reserved for #3/#4 and is not implemented in #2".to_string())
+fn get_global_ai_configuration(
+    app: tauri::AppHandle,
+) -> Result<Option<GlobalAiConfiguration>, String> {
+    let connection = open_local_store(&app)?;
+    connection
+        .query_row(
+            "SELECT base_url, model, temperature, max_tokens
+             FROM global_ai_configuration WHERE id = 1",
+            [],
+            |row| {
+                Ok(GlobalAiConfiguration {
+                    base_url: row.get(0)?,
+                    model: row.get(1)?,
+                    temperature: row.get(2)?,
+                    max_tokens: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("failed to read global AI configuration: {error}"))
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn set_secret(_secret_id: String, _secret_value: String) -> Result<(), String> {
-    Err("Keychain secret store is reserved for #3/#4 and is not implemented in #2".to_string())
+fn save_global_ai_configuration(
+    app: tauri::AppHandle,
+    configuration: GlobalAiConfiguration,
+) -> Result<(), String> {
+    if configuration.base_url.trim().is_empty() {
+        return Err("AI provider base URL is required".to_string());
+    }
+
+    if configuration.model.trim().is_empty() {
+        return Err("AI provider model is required".to_string());
+    }
+
+    let connection = open_local_store(&app)?;
+    connection
+        .execute(
+            "INSERT INTO global_ai_configuration
+                (id, base_url, model, temperature, max_tokens, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET
+                base_url = excluded.base_url,
+                model = excluded.model,
+                temperature = excluded.temperature,
+                max_tokens = excluded.max_tokens,
+                updated_at = CURRENT_TIMESTAMP",
+            params![
+                configuration.base_url,
+                configuration.model,
+                configuration.temperature,
+                configuration.max_tokens
+            ],
+        )
+        .map_err(|error| format!("failed to save global AI configuration: {error}"))?;
+
+    Ok(())
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn delete_secret(_secret_id: String) -> Result<(), String> {
-    Err("Keychain secret store is reserved for #3/#4 and is not implemented in #2".to_string())
+fn get_secret(secret_id: String) -> Result<Option<String>, String> {
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-a",
+            &secret_id,
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+        ])
+        .output()
+        .map_err(|error| format!("failed to read Keychain secret: {error}"))?;
+
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout)
+                .trim_end_matches('\n')
+                .to_string(),
+        ));
+    }
+
+    if output.status.code() == Some(44)
+        || String::from_utf8_lossy(&output.stderr).contains("could not be found")
+    {
+        return Ok(None);
+    }
+
+    Err(format!(
+        "failed to read Keychain secret: {}",
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_secret(secret_id: String, secret_value: String) -> Result<(), String> {
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "add-generic-password",
+            "-a",
+            &secret_id,
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+            &secret_value,
+            "-U",
+        ])
+        .output()
+        .map_err(|error| format!("failed to write Keychain secret: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "failed to write Keychain secret: {}",
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn delete_secret(secret_id: String) -> Result<(), String> {
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "delete-generic-password",
+            "-a",
+            &secret_id,
+            "-s",
+            KEYCHAIN_SERVICE,
+        ])
+        .output()
+        .map_err(|error| format!("failed to delete Keychain secret: {error}"))?;
+
+    if output.status.success()
+        || output.status.code() == Some(44)
+        || String::from_utf8_lossy(&output.stderr).contains("could not be found")
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "failed to delete Keychain secret: {}",
+        String::from_utf8_lossy(&output.stderr)
+    ))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -98,6 +255,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_theme_preference,
             set_theme_preference,
+            get_global_ai_configuration,
+            save_global_ai_configuration,
             get_secret,
             set_secret,
             delete_secret

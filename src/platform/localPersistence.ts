@@ -3,9 +3,23 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 export type ThemePreference = "system" | "light" | "dark";
 type TauriInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
+export const AI_PROVIDER_API_KEY_SECRET_ID = "global-ai-provider-api-key";
+
+export interface GlobalAiConfiguration {
+  baseUrl: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+}
+
 export interface PreferenceStore {
   getThemePreference(): Promise<ThemePreference>;
   setThemePreference(themePreference: ThemePreference): Promise<void>;
+}
+
+export interface AiConfigurationStore {
+  getGlobalAiConfiguration(): Promise<GlobalAiConfiguration | null>;
+  saveGlobalAiConfiguration(configuration: GlobalAiConfiguration): Promise<void>;
 }
 
 export interface SecretStore {
@@ -16,6 +30,7 @@ export interface SecretStore {
 
 export interface LocalPersistence {
   preferences: PreferenceStore;
+  aiConfiguration: AiConfigurationStore;
   secrets: SecretStore;
 }
 
@@ -25,8 +40,10 @@ export function isThemePreference(value: unknown): value is ThemePreference {
 
 export function createInMemoryLocalPersistence(initial?: {
   themePreference?: ThemePreference;
+  aiConfiguration?: GlobalAiConfiguration | null;
 }): LocalPersistence {
   let themePreference = initial?.themePreference ?? "system";
+  let aiConfiguration = initial?.aiConfiguration ?? null;
   const secrets = new Map<string, string>();
 
   return {
@@ -36,6 +53,14 @@ export function createInMemoryLocalPersistence(initial?: {
       },
       async setThemePreference(nextThemePreference) {
         themePreference = nextThemePreference;
+      },
+    },
+    aiConfiguration: {
+      async getGlobalAiConfiguration() {
+        return aiConfiguration;
+      },
+      async saveGlobalAiConfiguration(nextConfiguration) {
+        aiConfiguration = nextConfiguration;
       },
     },
     secrets: {
@@ -65,6 +90,15 @@ export function createTauriLocalPersistence(invoke: TauriInvoke = tauriInvoke): 
         await invoke("set_theme_preference", { themePreference });
       },
     },
+    aiConfiguration: {
+      async getGlobalAiConfiguration() {
+        const configuration = await invoke("get_global_ai_configuration");
+        return isGlobalAiConfiguration(configuration) ? configuration : null;
+      },
+      async saveGlobalAiConfiguration(configuration) {
+        await invoke("save_global_ai_configuration", { configuration });
+      },
+    },
     secrets: {
       async getSecret(secretId) {
         const secretValue = await invoke("get_secret", { secretId });
@@ -88,3 +122,17 @@ export function createDefaultLocalPersistence(): LocalPersistence {
 }
 
 export const defaultLocalPersistence = createDefaultLocalPersistence();
+
+function isGlobalAiConfiguration(value: unknown): value is GlobalAiConfiguration {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.baseUrl === "string" &&
+    typeof candidate.model === "string" &&
+    typeof candidate.temperature === "number" &&
+    typeof candidate.maxTokens === "number"
+  );
+}

@@ -140,13 +140,57 @@ body {
   font-size: 13px;
 }
 
-.field select {
+.field select,
+.field input {
   width: 100%;
   border: 1px solid var(--panel-border);
   border-radius: 7px;
   background: var(--control-bg);
   color: var(--text);
   padding: 8px 10px;
+}
+
+.ai-config-form {
+  padding-bottom: 12px;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.compact-field {
+  margin-top: 0;
+}
+
+.primary-button {
+  width: calc(100% - 24px);
+  margin: 0 12px;
+  border: 1px solid #2a8f70;
+  border-radius: 7px;
+  background: #33a17e;
+  color: #08110d;
+  font-weight: 700;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+
+.secondary-button {
+  width: calc(100% - 24px);
+  margin: 10px 12px 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: var(--control-bg);
+  color: var(--text);
+  font-weight: 650;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+
+.status-line {
+  margin: 10px 12px 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .empty-state,
