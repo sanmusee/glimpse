@@ -624,6 +624,7 @@ describe("Glimpse app shell", () => {
           ok: true,
           rowCount: 0,
           columns: [],
+          rows: [],
         };
       },
     });
@@ -788,6 +789,10 @@ describe("Glimpse app shell", () => {
           ok: true,
           rowCount: 2,
           columns: ["id", "amount"],
+          rows: [
+            [1, 10],
+            [2, 20],
+          ],
         };
       },
     });
@@ -826,6 +831,198 @@ describe("Glimpse app shell", () => {
         }),
       ],
     });
+  });
+
+  it("shows the current successful execution result in a basic horizontally scrollable table", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: () => ({
+        ok: true,
+        rowCount: 2,
+        columns: ["id", "customer_name", "lifetime_value"],
+        rows: [
+          [1, "Acme", 1200],
+          [2, "Globex", null],
+        ],
+      }),
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
+      target: { value: "select id, customer_name, lifetime_value from customers limit 10" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByRole("table", { name: /current result set/i }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "#" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "customer_name" })).toBeInTheDocument();
+    expect(screen.getByRole("rowheader", { name: "1" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "Acme" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "NULL" })).toBeInTheDocument();
+    expect(screen.getByLabelText(/scroll current result set horizontally/i))
+      .toHaveClass("result-table-scroll");
+  });
+
+  it("shows column headers and an empty state for successful executions with no rows", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: () => ({
+        ok: true,
+        rowCount: 0,
+        columns: ["id", "amount"],
+        rows: [],
+      }),
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
+      target: { value: "select id, amount from orders where false limit 10" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByRole("table", { name: /current result set/i }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "amount" })).toBeInTheDocument();
+    expect(screen.getByText(/no rows returned/i)).toBeInTheDocument();
+  });
+
+  it("lets users copy cells, rows, visible results, and the current SQL", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: () => ({
+        ok: true,
+        rowCount: 2,
+        columns: ["id", "customer_name", "lifetime_value"],
+        rows: [
+          [1, "Acme", 1200],
+          [2, "Globex", null],
+        ],
+      }),
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
+      target: { value: "select id, customer_name, lifetime_value from customers limit 10" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+    await screen.findByRole("table", { name: /current result set/i });
+
+    fireEvent.click(screen.getByRole("cell", { name: "Acme" }));
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("Acme"));
+
+    fireEvent.click(screen.getByRole("rowheader", { name: "1" }));
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("1\tAcme\t1200"));
+
+    fireEvent.click(screen.getByRole("button", { name: /copy visible results/i }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith(
+        "id\tcustomer_name\tlifetime_value\n1\tAcme\t1200\n2\tGlobex\tNULL",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /copy current sql/i }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith(
+        "select id, customer_name, lifetime_value from customers limit 10",
+      ),
+    );
+    expect(screen.queryByRole("button", { name: /csv/i })).not.toBeInTheDocument();
+  });
+
+  it("does not carry result rows into Query Session history or newly opened sessions", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: () => ({
+        ok: true,
+        rowCount: 1,
+        columns: ["id", "private_value"],
+        rows: [[1, "sensitive-row-value"]],
+      }),
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
+      target: { value: "select id, private_value from orders limit 1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByText("sensitive-row-value")).toBeInTheDocument();
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      executionResultMetadata: [
+        expect.objectContaining({
+          rowCount: 1,
+          columns: ["id", "private_value"],
+        }),
+      ],
+    });
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.not.toEqual(
+      expect.objectContaining({
+        executionResultMetadata: expect.arrayContaining([
+          expect.objectContaining({ rows: expect.any(Array) }),
+        ]),
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: /sql draft/i })).toHaveValue(""),
+    );
+    expect(screen.queryByText("sensitive-row-value")).not.toBeInTheDocument();
   });
 
   it("persists failed read-only execution metadata and offers SQL repair without starting it automatically", async () => {
@@ -981,6 +1178,7 @@ describe("Glimpse app shell", () => {
           ok: true,
           rowCount: 0,
           columns: [],
+          rows: [],
         };
       },
     });

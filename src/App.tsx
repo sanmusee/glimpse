@@ -27,6 +27,8 @@ import {
   type GlobalAiConfiguration,
   type LocalPersistence,
   type QuerySession,
+  type SqlResultCellValue,
+  type SqlResultRow,
   type ThemePreference,
 } from "./platform/localPersistence";
 import { validateSqlForExecution } from "./sqlExecution";
@@ -51,6 +53,11 @@ interface AiConfigurationFormState {
   model: string;
   temperature: string;
   maxTokens: string;
+}
+
+interface CurrentResultSet {
+  columns: string[];
+  rows: SqlResultRow[];
 }
 
 const emptyAiConfigurationForm: AiConfigurationFormState = {
@@ -98,6 +105,7 @@ export function App({
   const [sqlGenerationStatus, setSqlGenerationStatus] = useState("");
   const [executionStatus, setExecutionStatus] = useState("");
   const [executionWarnings, setExecutionWarnings] = useState<string[]>([]);
+  const [currentResultSet, setCurrentResultSet] = useState<CurrentResultSet | null>(null);
   const [hasGeneratedSql, setHasGeneratedSql] = useState(false);
   const [selectedCandidateTableName, setSelectedCandidateTableName] = useState("");
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
@@ -218,6 +226,10 @@ export function App({
     setConnectionTestMessage(result.message);
   };
 
+  const copyText = async (text: string) => {
+    await navigator.clipboard?.writeText(text);
+  };
+
   const editDatabaseConnection = (connection: DatabaseConnection) => {
     setDatabaseConnectionForm({
       id: connection.id,
@@ -277,11 +289,18 @@ export function App({
       databaseConnectionId: connection.id,
     });
 
-    setCurrentQuerySession(createdSession);
+    openQuerySession(createdSession);
     setQuerySessions((currentSessions) => [
       createdSession,
       ...currentSessions.filter((session) => session.id !== createdSession.id),
     ]);
+  };
+
+  const openQuerySession = (session: QuerySession) => {
+    setCurrentQuerySession(session);
+    setExecutionStatus("");
+    setExecutionWarnings([]);
+    setCurrentResultSet(null);
   };
 
   const updateCurrentQuerySession = (updatedSession: QuerySession) => {
@@ -577,6 +596,7 @@ export function App({
 
     const executionSession = currentQuerySession;
     setExecutionStatus("Running SQL in Read-only Mode");
+    setCurrentResultSet(null);
 
     try {
       const result = await localPersistence.sqlExecution.executeSql({
@@ -607,6 +627,7 @@ export function App({
       );
 
       updateCurrentQuerySession(savedSession);
+      setCurrentResultSet(result.ok ? { columns: result.columns, rows: result.rows } : null);
       setExecutionStatus(
         result.ok
           ? `Execution succeeded: ${result.rowCount} rows, ${result.columns.length} columns`
@@ -721,6 +742,22 @@ export function App({
     } catch (error) {
       setSqlGenerationStatus(formatSqlRepairError(error));
     }
+  };
+
+  const copyCurrentSql = async () => {
+    if (!currentQuerySession) {
+      return;
+    }
+
+    await copyText(currentQuerySession.sqlDraft);
+  };
+
+  const copyVisibleResults = async () => {
+    if (!currentResultSet) {
+      return;
+    }
+
+    await copyText(formatResultSetForCopy(currentResultSet));
   };
 
   const addCandidateTable = async () => {
@@ -937,7 +974,7 @@ export function App({
                   className="session-row"
                   type="button"
                   key={session.id}
-                  onClick={() => setCurrentQuerySession(session)}
+                  onClick={() => openQuerySession(session)}
                 >
                   <strong>{session.connectionName}</strong>
                   <span>
@@ -963,6 +1000,13 @@ export function App({
             value={currentQuerySession?.sqlDraft ?? ""}
           />
           <div className="editor-actions">
+            <button
+              type="button"
+              onClick={copyCurrentSql}
+              disabled={!currentQuerySession}
+            >
+              Copy current SQL
+            </button>
             <button
               className="primary-action"
               type="button"
@@ -999,6 +1043,16 @@ export function App({
             >
               Repair SQL
             </button>
+          ) : null}
+          {currentResultSet ? (
+            <>
+              <div className="result-actions">
+                <button type="button" onClick={copyVisibleResults}>
+                  Copy visible results
+                </button>
+              </div>
+              <ResultTable resultSet={currentResultSet} onCopyText={copyText} />
+            </>
           ) : null}
           {currentQuerySession?.executionResultMetadata.length ? (
             <div className="execution-metadata-list" aria-label="Execution result metadata">
@@ -1270,6 +1324,100 @@ export function App({
       </aside>
     </main>
   );
+}
+
+function ResultTable({
+  resultSet,
+  onCopyText,
+}: {
+  resultSet: CurrentResultSet;
+  onCopyText: (text: string) => Promise<void>;
+}) {
+  return (
+    <div
+      aria-label="Scroll current result set horizontally"
+      className="result-table-scroll"
+      tabIndex={0}
+    >
+      <table aria-label="Current result set" className="result-table">
+        <thead>
+          <tr>
+            <th scope="col">#</th>
+            {resultSet.columns.map((column, columnIndex) => (
+              <th scope="col" key={`${column}-${columnIndex}`}>
+                {column}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {resultSet.rows.length === 0 ? (
+            <tr>
+              <td className="result-table-empty-cell" colSpan={resultSet.columns.length + 1}>
+                No rows returned
+              </td>
+            </tr>
+          ) : (
+            resultSet.rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                <th
+                  className="copyable-result-cell"
+                  scope="row"
+                  tabIndex={0}
+                  title={`Copy row ${rowIndex + 1}`}
+                  onClick={() => onCopyText(formatResultRowForCopy(row))}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onCopyText(formatResultRowForCopy(row));
+                    }
+                  }}
+                >
+                  {rowIndex + 1}
+                </th>
+                {resultSet.columns.map((column, columnIndex) => (
+                  <td
+                    className="copyable-result-cell"
+                    key={`${column}-${columnIndex}`}
+                    tabIndex={0}
+                    title={`Copy ${column}`}
+                    onClick={() => onCopyText(formatResultCell(row[columnIndex]))}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onCopyText(formatResultCell(row[columnIndex]));
+                      }
+                    }}
+                  >
+                    {formatResultCell(row[columnIndex])}
+                  </td>
+                ))}
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function formatResultSetForCopy(resultSet: CurrentResultSet) {
+  return [
+    resultSet.columns.join("\t"),
+    ...resultSet.rows.map((row) => formatResultRowForCopy(row)),
+  ].join("\n");
+}
+
+function formatResultRowForCopy(row: SqlResultRow) {
+  return row.map((value) => formatResultCell(value)).join("\t");
+}
+
+function formatResultCell(value: SqlResultCellValue | undefined) {
+  if (value === null || value === undefined) {
+    return "NULL";
+  }
+
+  return String(value);
 }
 
 function formatCatalogError(error: unknown) {

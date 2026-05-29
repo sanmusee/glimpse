@@ -302,6 +302,7 @@ button:disabled {
 
 .editor-actions {
   display: flex;
+  gap: 8px;
   justify-content: flex-end;
   margin: 0 12px 12px;
 }
@@ -324,6 +325,66 @@ button:disabled {
   display: grid;
   gap: 8px;
   margin: 12px;
+}
+
+.result-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 12px 12px;
+}
+
+.result-table-scroll {
+  margin: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+
+.result-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.result-table th,
+.result-table td {
+  min-width: 120px;
+  max-width: 280px;
+  border-bottom: 1px solid var(--divider);
+  border-right: 1px solid var(--divider);
+  padding: 8px 10px;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-table th:first-child {
+  min-width: 48px;
+  width: 48px;
+  color: var(--muted);
+  text-align: right;
+}
+
+.result-table thead th {
+  background: var(--editor-bg);
+  color: var(--text);
+  font-weight: 650;
+}
+
+.result-table tbody tr:last-child th,
+.result-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.copyable-result-cell {
+  cursor: copy;
+}
+
+.result-table-empty-cell {
+  color: var(--muted);
+  text-align: center;
 }
 
 .execution-metadata-row {
