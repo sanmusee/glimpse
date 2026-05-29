@@ -5,6 +5,10 @@ import {
   type DiscoverCandidateTablesInput,
 } from "./candidateTableDiscovery";
 import {
+  generateSqlFromQueryNeed,
+  type GenerateSqlFromQueryNeedInput,
+} from "./sqlGeneration";
+import {
   runStreamingAiProviderTest,
   type AiProviderTestResult,
 } from "./aiProviderTestClient";
@@ -30,6 +34,7 @@ interface AppProps {
   candidateTableDiscoverer?: (
     input: DiscoverCandidateTablesInput,
   ) => Promise<CandidateTable[]>;
+  sqlGenerator?: (input: GenerateSqlFromQueryNeedInput) => Promise<string>;
 }
 
 interface AiConfigurationFormState {
@@ -61,6 +66,7 @@ export function App({
   localPersistence = defaultLocalPersistence,
   aiProviderTester = runStreamingAiProviderTest,
   candidateTableDiscoverer = discoverCandidateTables,
+  sqlGenerator = generateSqlFromQueryNeed,
 }: AppProps) {
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [databaseConnections, setDatabaseConnections] = useState<DatabaseConnection[]>([]);
@@ -78,6 +84,8 @@ export function App({
   const [aiProviderTestStatus, setAiProviderTestStatus] = useState("");
   const [queryNeed, setQueryNeed] = useState("");
   const [candidateTableStatus, setCandidateTableStatus] = useState("");
+  const [sqlGenerationStatus, setSqlGenerationStatus] = useState("");
+  const [hasGeneratedSql, setHasGeneratedSql] = useState(false);
   const [selectedCandidateTableName, setSelectedCandidateTableName] = useState("");
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
   const userSelectedThemePreference = useRef(false);
@@ -271,18 +279,24 @@ export function App({
     ]);
   };
 
+  const updateSqlDraftInState = (sessionId: string, sqlDraft: string) => {
+    setCurrentQuerySession((currentSession) =>
+      currentSession?.id === sessionId ? { ...currentSession, sqlDraft } : currentSession,
+    );
+    setQuerySessions((currentSessions) =>
+      currentSessions.map((session) =>
+        session.id === sessionId ? { ...session, sqlDraft } : session,
+      ),
+    );
+  };
+
   const updateSqlDraft = async (sqlDraft: string) => {
     if (!currentQuerySession) {
       return;
     }
 
-    const optimisticSession = { ...currentQuerySession, sqlDraft };
-    setCurrentQuerySession(optimisticSession);
-    setQuerySessions((currentSessions) =>
-      currentSessions.map((session) =>
-        session.id === optimisticSession.id ? optimisticSession : session,
-      ),
-    );
+    updateSqlDraftInState(currentQuerySession.id, sqlDraft);
+    setHasGeneratedSql(false);
 
     const savedSession = await localPersistence.querySessions.saveSqlDraft(
       currentQuerySession.id,
@@ -355,6 +369,88 @@ export function App({
       );
     } catch (error) {
       setCandidateTableStatus(formatCandidateTableError(error));
+    }
+  };
+
+  const runSqlGeneration = async () => {
+    if (!currentQuerySession || !activeCatalog) {
+      setSqlGenerationStatus("Open a catalog and create a Query Session first");
+      return;
+    }
+
+    const trimmedQueryNeed = queryNeed.trim();
+    if (!trimmedQueryNeed) {
+      setSqlGenerationStatus("Query need is required");
+      return;
+    }
+
+    const configuration: GlobalAiConfiguration = {
+      baseUrl: aiConfigurationForm.baseUrl.trim(),
+      model: aiConfigurationForm.model.trim(),
+      temperature: Number(aiConfigurationForm.temperature),
+      maxTokens: Number(aiConfigurationForm.maxTokens),
+    };
+    const apiKey =
+      aiConfigurationForm.apiKey ||
+      (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID));
+
+    if (!configuration.baseUrl || !configuration.model || !apiKey) {
+      setSqlGenerationStatus("AI configuration and API key are required");
+      return;
+    }
+
+    const generationSession = currentQuerySession;
+    let streamedSql = "";
+    setHasGeneratedSql(false);
+    setSqlGenerationStatus("Generating SQL");
+
+    try {
+      const generatedSql = await sqlGenerator({
+        queryNeed: trimmedQueryNeed,
+        session: generationSession,
+        catalog: activeCatalog,
+        configuration,
+        apiKey,
+        onPartialSql: (partialSql) => {
+          streamedSql = partialSql;
+          updateSqlDraftInState(generationSession.id, partialSql);
+        },
+      });
+      const finalSql = generatedSql || streamedSql;
+      updateSqlDraftInState(generationSession.id, finalSql);
+
+      const savedDraftSession = await localPersistence.querySessions.saveSqlDraft(
+        generationSession.id,
+        finalSql,
+      );
+      const savedConversationSession =
+        await localPersistence.querySessions.saveAiConversationHistory(
+          generationSession.id,
+          [
+            ...generationSession.aiConversationHistory,
+            {
+              id: createUiLocalId(),
+              role: "user",
+              content: trimmedQueryNeed,
+              createdAt: new Date().toISOString(),
+            },
+            {
+              id: createUiLocalId(),
+              role: "assistant",
+              content: finalSql,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        );
+
+      updateCurrentQuerySession({
+        ...savedConversationSession,
+        sqlDraft: savedDraftSession.sqlDraft,
+      });
+      setHasGeneratedSql(true);
+      setSqlGenerationStatus("SQL generated. Review it before manual execution.");
+    } catch (error) {
+      setSqlGenerationStatus(formatSqlGenerationError(error));
     }
   };
 
@@ -631,6 +727,22 @@ export function App({
           {candidateTableStatus ? (
             <div className="status-line">{candidateTableStatus}</div>
           ) : null}
+          <button
+            className="primary-button"
+            type="button"
+            onClick={runSqlGeneration}
+            disabled={!currentQuerySession || !activeCatalog}
+          >
+            Generate SQL
+          </button>
+          {sqlGenerationStatus ? (
+            <div className="status-line">{sqlGenerationStatus}</div>
+          ) : null}
+          {hasGeneratedSql ? (
+            <button className="secondary-button" type="button">
+              Run generated SQL manually
+            </button>
+          ) : null}
           <div className="empty-state">
             <strong>Configure global AI provider</strong>
             <p>Add an OpenAI-compatible provider before generating SQL.</p>
@@ -837,4 +949,17 @@ function formatCatalogError(error: unknown) {
 function formatCandidateTableError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return `Candidate table discovery failed: ${message}`;
+}
+
+function formatSqlGenerationError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return `SQL generation failed: ${message}`;
+}
+
+function createUiLocalId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
