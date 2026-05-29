@@ -861,7 +861,7 @@ describe("Glimpse app shell", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
 
-    expect(await screen.findByText(/warehouse \/ analytics/i)).toBeInTheDocument();
+    expect((await screen.findAllByText(/warehouse \/ analytics/i))[0]).toBeInTheDocument();
     const sqlEditor = screen.getByRole("textbox", { name: /sql draft/i });
 
     fireEvent.change(sqlEditor, { target: { value: "select * from orders" } });
@@ -875,6 +875,183 @@ describe("Glimpse app shell", () => {
       aiConversationHistory: [],
       executionResultMetadata: [],
     });
+  });
+
+  it("creates a SQL Console from the selected Database Connection and never before selection", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+        {
+          id: "db-2",
+          name: "Reporting",
+          host: "reporting.internal",
+          port: 4000,
+          username: "analyst",
+          passwordSecretId: "database-connection:db-2:password",
+          defaultDatabase: "mart",
+        },
+      ],
+    });
+    render(<App localPersistence={localPersistence} />);
+
+    const newConsoleButton = screen.getByRole("button", { name: /new console/i });
+    expect(newConsoleButton).toBeDisabled();
+
+    fireEvent.click(await screen.findByRole("treeitem", { name: /warehouse analytics/i }));
+    expect(newConsoleButton).not.toBeDisabled();
+    fireEvent.click(newConsoleButton);
+
+    const sqlConsoleList = await screen.findByRole("list", { name: /sql console list/i });
+    expect(
+      within(sqlConsoleList).getByRole("button", {
+        name: /open sql console warehouse analytics empty sql draft active/i,
+      }),
+    ).toBeInTheDocument();
+    expect(within(sqlConsoleList).getByText(/warehouse \/ analytics/i)).toBeInTheDocument();
+    await expect(localPersistence.querySessions.listQuerySessions()).resolves.toEqual([
+      expect.objectContaining({
+        databaseConnectionId: "db-1",
+        connectionName: "Warehouse",
+        defaultDatabase: "analytics",
+      }),
+    ]);
+  });
+
+  it("double-clicking a Database Connection opens its most recent SQL Console without creating another one", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+        {
+          id: "db-2",
+          name: "Reporting",
+          host: "reporting.internal",
+          port: 4000,
+          username: "analyst",
+          passwordSecretId: "database-connection:db-2:password",
+          defaultDatabase: "mart",
+        },
+      ],
+    });
+    const warehouseConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(
+      warehouseConsole.id,
+      "select * from warehouse_orders",
+    );
+    const reportingConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-2",
+    });
+    await localPersistence.querySessions.saveSqlDraft(reportingConsole.id, "select * from facts");
+
+    render(<App localPersistence={localPersistence} />);
+
+    expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue(
+      "select * from facts",
+    );
+    fireEvent.doubleClick(await screen.findByRole("treeitem", { name: /warehouse analytics/i }));
+
+    expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue(
+      "select * from warehouse_orders",
+    );
+    await expect(localPersistence.querySessions.listQuerySessions()).resolves.toHaveLength(2);
+  });
+
+  it("double-clicking a Database Connection creates a SQL Console when none exists for it", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+    });
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.doubleClick(await screen.findByRole("treeitem", { name: /warehouse analytics/i }));
+
+    const sqlConsoleList = await screen.findByRole("list", { name: /sql console list/i });
+    expect(
+      within(sqlConsoleList).getByRole("button", {
+        name: /open sql console warehouse analytics empty sql draft active/i,
+      }),
+    ).toBeInTheDocument();
+    await expect(localPersistence.querySessions.listQuerySessions()).resolves.toEqual([
+      expect.objectContaining({
+        databaseConnectionId: "db-1",
+        connectionName: "Warehouse",
+        defaultDatabase: "analytics",
+      }),
+    ]);
+  });
+
+  it("switches the active SQL Console from the SQL Console List and shows its SQL Draft", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+    });
+    const ordersConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(ordersConsole.id, "select * from orders");
+    const customersConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(
+      customersConsole.id,
+      "select * from customers",
+    );
+
+    render(<App localPersistence={localPersistence} />);
+
+    expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue(
+      "select * from customers",
+    );
+    const sqlConsoleList = await screen.findByRole("list", { name: /sql console list/i });
+    fireEvent.click(
+      within(sqlConsoleList).getByRole("button", {
+        name: /open sql console warehouse analytics select \* from orders/i,
+      }),
+    );
+
+    expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue(
+      "select * from orders",
+    );
+    expect(
+      within(sqlConsoleList).getByRole("button", {
+        name: /open sql console warehouse analytics select \* from orders active/i,
+      }),
+    ).toBeInTheDocument();
   });
 
   it("restores the most recent query session and SQL draft after app restart", async () => {
@@ -902,7 +1079,7 @@ describe("Glimpse app shell", () => {
     unmount();
     render(<App localPersistence={localPersistence} />);
 
-    expect(await screen.findByText(/warehouse \/ analytics/i)).toBeInTheDocument();
+    expect((await screen.findAllByText(/warehouse \/ analytics/i))[0]).toBeInTheDocument();
     expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue(
       "select count(*) from orders",
     );
