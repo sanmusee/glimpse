@@ -142,10 +142,15 @@ export function App({
   const [selectedCandidateTableName, setSelectedCandidateTableName] = useState("");
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
   const [selectedDataSourceId, setSelectedDataSourceId] = useState<string | null>(null);
+  const [selectedDatabaseConnectionId, setSelectedDatabaseConnectionId] = useState<string | null>(
+    null,
+  );
   const [activeDialog, setActiveDialog] = useState<
     "dataSources" | "modelProviders" | "preferences" | null
   >(null);
   const userSelectedThemePreference = useRef(false);
+  const selectedDatabaseConnection =
+    databaseConnections.find((connection) => connection.id === selectedDatabaseConnectionId) ?? null;
 
   useEffect(() => {
     let isCurrent = true;
@@ -275,6 +280,7 @@ export function App({
 
     setDatabaseConnections(refreshedConnections);
     setSelectedDataSourceId(savedConnection.id);
+    setSelectedDatabaseConnectionId(savedConnection.id);
     setDatabaseConnectionForm({
       id: savedConnection.id,
       name: savedConnection.name,
@@ -328,6 +334,9 @@ export function App({
     }
     if (expandedCatalogConnectionId === connection.id) {
       setExpandedCatalogConnectionId(null);
+    }
+    if (selectedDatabaseConnectionId === connection.id) {
+      setSelectedDatabaseConnectionId(null);
     }
   };
 
@@ -415,6 +424,21 @@ export function App({
     setExecutionStatus("");
     setExecutionWarnings([]);
     setCurrentResultSet(null);
+  };
+
+  const openLatestQuerySessionForConnection = async (connection: DatabaseConnection) => {
+    setSelectedDatabaseConnectionId(connection.id);
+    const sessions = await localPersistence.querySessions.listQuerySessions();
+    const latestConnectionSession = sessions.find(
+      (session) => session.databaseConnectionId === connection.id,
+    );
+
+    if (latestConnectionSession) {
+      await openQuerySession(latestConnectionSession);
+      return;
+    }
+
+    await createQuerySession(connection);
   };
 
   const deleteQuerySession = async (session: QuerySession) => {
@@ -1009,8 +1033,10 @@ export function App({
         </button>
         <button
           type="button"
-          onClick={() => databaseConnections[0] && createQuerySession(databaseConnections[0])}
-          disabled={!databaseConnections.length}
+          onClick={() =>
+            selectedDatabaseConnection && createQuerySession(selectedDatabaseConnection)
+          }
+          disabled={!selectedDatabaseConnection}
         >
           New Console
         </button>
@@ -1045,10 +1071,15 @@ export function App({
                 return (
                   <article className="connection-tree-row" key={connection.id}>
                     <div
-                      aria-label={`${connection.name} ${connection.defaultDatabase}`}
+                      aria-label={`${connection.name} ${connection.defaultDatabase}${
+                        selectedDatabaseConnectionId === connection.id ? " selected" : ""
+                      }`}
+                      aria-selected={selectedDatabaseConnectionId === connection.id}
                       className="connection-tree-item"
                       aria-expanded={isExpanded}
                       role="treeitem"
+                      onClick={() => setSelectedDatabaseConnectionId(connection.id)}
+                      onDoubleClick={() => openLatestQuerySessionForConnection(connection)}
                     >
                       <strong>{connection.name}</strong>
                       <span>{connection.defaultDatabase}</span>
@@ -1236,6 +1267,35 @@ export function App({
             AI Conversation View
           </button>
         </div>
+        <section aria-label="SQL Console List" className="panel">
+          <div className="panel-title">SQL Console List</div>
+          {querySessions.length === 0 ? (
+            <div className="placeholder-row">No SQL Consoles yet</div>
+          ) : (
+            <div className="session-list" role="list" aria-label="SQL Console List">
+              {querySessions.map((session) => (
+                <article className="session-row" key={session.id}>
+                  <button
+                    className="session-open-button"
+                    type="button"
+                    aria-label={`Open SQL Console ${session.connectionName} ${session.defaultDatabase} ${formatSessionSqlPreview(session)}${
+                      currentQuerySession?.id === session.id ? " active" : ""
+                    }`}
+                    aria-pressed={currentQuerySession?.id === session.id}
+                    onClick={() => openQuerySession(session)}
+                  >
+                    <strong>{session.connectionName}</strong>
+                    <span>
+                      {session.connectionName} / {session.defaultDatabase}
+                    </span>
+                    <small>{formatSessionSqlPreview(session)}</small>
+                  </button>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
         <section aria-label="AI assistant" className="panel">
           <div className="panel-title">AI Assistant</div>
           <label className="field">
