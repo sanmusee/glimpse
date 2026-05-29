@@ -374,4 +374,46 @@ describe("local persistence boundary", () => {
       },
     ]);
   });
+
+  it("routes SQL execution through the desktop command with the selected safety mode", async () => {
+    const calls: Array<{ command: string; args?: unknown }> = [];
+    const localPersistence = createTauriLocalPersistence(async (command, args) => {
+      calls.push({ command, args });
+
+      if (command === "execute_sql") {
+        return {
+          ok: true,
+          rowCount: 2,
+          columns: ["id", "amount"],
+        };
+      }
+
+      return null;
+    });
+
+    await expect(
+      localPersistence.sqlExecution.executeSql({
+        connectionId: "db-1",
+        sql: "select id, amount from orders",
+        safetyMode: "readOnly",
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      rowCount: 2,
+      columns: ["id", "amount"],
+    });
+
+    expect(calls).toEqual([
+      {
+        command: "execute_sql",
+        args: {
+          input: {
+            connectionId: "db-1",
+            sql: "select id, amount from orders",
+            safetyMode: "readOnly",
+          },
+        },
+      },
+    ]);
+  });
 });

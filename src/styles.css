@@ -288,7 +288,7 @@ button:disabled {
 
 .editor-surface {
   margin: 12px;
-  min-height: calc(100% - 66px);
+  min-height: calc(100% - 118px);
   border: 1px solid var(--editor-border);
   border-radius: 8px;
   background: var(--editor-bg);
@@ -298,6 +298,49 @@ button:disabled {
   font-size: 13px;
   line-height: 1.6;
   white-space: pre-wrap;
+}
+
+.editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 12px 12px;
+}
+
+.execution-warning,
+.execution-status {
+  margin: 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  padding: 10px;
+  color: var(--text);
+}
+
+.execution-warning {
+  border-color: #9a7a3a;
+  color: #f1cf86;
+}
+
+.execution-metadata-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px;
+}
+
+.execution-metadata-row {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.execution-metadata-row strong,
+.execution-metadata-row span {
+  display: block;
+}
+
+.execution-metadata-row span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
 }
 
 .catalog-panel {

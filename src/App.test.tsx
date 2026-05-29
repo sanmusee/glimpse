@@ -593,6 +593,7 @@ describe("Glimpse app shell", () => {
   });
 
   it("generates SQL from the query need, streams it into the editor, and persists the conversation without executing", async () => {
+    const executionAttempts: string[] = [];
     const localPersistence = createInMemoryLocalPersistence({
       aiConfiguration: {
         baseUrl: "https://ai.example.test/v1",
@@ -612,6 +613,15 @@ describe("Glimpse app shell", () => {
         },
       ],
       readDatabaseCatalog: () => warehouseCatalogWithCustomers,
+      executeSql: (input) => {
+        executionAttempts.push(input.sql);
+
+        return {
+          ok: true,
+          rowCount: 0,
+          columns: [],
+        };
+      },
     });
     await localPersistence.secrets.setSecret(AI_PROVIDER_API_KEY_SECRET_ID, "sk-test-secret");
     const sqlGenerator = vi.fn(async ({ onPartialSql }: GenerateSqlFromQueryNeedInput) => {
@@ -648,6 +658,7 @@ describe("Glimpse app shell", () => {
     expect(await screen.findByRole("button", { name: /run generated sql manually/i }))
       .toBeInTheDocument();
     expect(screen.getByText(/no query has run/i)).toBeInTheDocument();
+    expect(executionAttempts).toEqual([]);
     expect(screen.queryByText(/sql explanation/i)).not.toBeInTheDocument();
     await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
       sqlDraft: "select customer_id, count(*) as order_count from orders group by customer_id",
@@ -750,5 +761,148 @@ describe("Glimpse app shell", () => {
         }),
       }),
     );
+  });
+
+  it("executes read-only SQL only after a manual click and persists successful execution metadata", async () => {
+    const executionAttempts: Array<{ connectionId: string; sql: string; safetyMode: string }> = [];
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: (input) => {
+        executionAttempts.push(input);
+
+        return {
+          ok: true,
+          rowCount: 2,
+          columns: ["id", "amount"],
+        };
+      },
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
+      target: { value: "select id, amount from orders" },
+    });
+
+    expect(executionAttempts).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByText(/missing limit may return a large result set/i))
+      .toBeInTheDocument();
+    expect(await screen.findByText(/execution succeeded: 2 rows, 2 columns/i))
+      .toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /sql draft/i })).toHaveValue(
+      "select id, amount from orders",
+    );
+    expect(executionAttempts).toEqual([
+      {
+        connectionId: "db-1",
+        sql: "select id, amount from orders",
+        safetyMode: "readOnly",
+      },
+    ]);
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      executionResultMetadata: [
+        expect.objectContaining({
+          sql: "select id, amount from orders",
+          rowCount: 2,
+          columns: ["id", "amount"],
+          errorMessage: undefined,
+        }),
+      ],
+    });
+  });
+
+  it("persists failed read-only execution metadata without starting SQL repair", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: () => ({
+        ok: false,
+        errorMessage: "Unknown column 'missing_column'",
+      }),
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
+      target: { value: "select missing_column from orders limit 10" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByText(/execution failed: unknown column 'missing_column'/i))
+      .toBeInTheDocument();
+    expect(screen.queryByText(/repair/i)).not.toBeInTheDocument();
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      executionResultMetadata: [
+        expect.objectContaining({
+          sql: "select missing_column from orders limit 10",
+          rowCount: 0,
+          columns: [],
+          errorMessage: "Unknown column 'missing_column'",
+        }),
+      ],
+    });
+  });
+
+  it("blocks write SQL before execution in Read-only Mode", async () => {
+    const executionAttempts: string[] = [];
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: (input) => {
+        executionAttempts.push(input.sql);
+
+        return {
+          ok: true,
+          rowCount: 0,
+          columns: [],
+        };
+      },
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
+      target: { value: "delete from orders" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByText(/read-only mode blocks delete statements/i)).toBeInTheDocument();
+    expect(executionAttempts).toEqual([]);
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      executionResultMetadata: [],
+    });
   });
 });
