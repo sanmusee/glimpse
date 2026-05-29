@@ -1054,6 +1054,191 @@ describe("Glimpse app shell", () => {
     ).toBeInTheDocument();
   });
 
+  it("switches the right-side content between SQL Console List and AI Conversation View", async () => {
+    render(<App localPersistence={createInMemoryLocalPersistence()} />);
+
+    const rightSide = screen.getByRole("region", { name: /right-side content switcher/i });
+    expect(within(rightSide).getByRole("region", { name: /sql console list/i }))
+      .toBeInTheDocument();
+    expect(within(rightSide).queryByRole("region", { name: /ai conversation view/i }))
+      .not.toBeInTheDocument();
+
+    fireEvent.click(within(rightSide).getByRole("tab", { name: /ai conversation view/i }));
+
+    expect(within(rightSide).getByRole("region", { name: /ai conversation view/i }))
+      .toBeInTheDocument();
+    expect(within(rightSide).getByRole("textbox", { name: /ai message/i }))
+      .toBeInTheDocument();
+    expect(within(rightSide).queryByRole("region", { name: /sql console list/i }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /sql editor/i })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /active console result set/i }))
+      .toBeInTheDocument();
+  });
+
+  it("shows AI conversation history for the active SQL Console when consoles switch", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+    });
+    const ordersConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(ordersConsole.id, "select * from orders");
+    await localPersistence.querySessions.saveAiConversationHistory(ordersConsole.id, [
+      {
+        id: "orders-message",
+        role: "user",
+        content: "Explain the orders query",
+        createdAt: "2026-05-30T09:00:00.000Z",
+      },
+    ]);
+    const customersConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(
+      customersConsole.id,
+      "select * from customers",
+    );
+    await localPersistence.querySessions.saveAiConversationHistory(customersConsole.id, [
+      {
+        id: "customers-message",
+        role: "user",
+        content: "Explain the customers query",
+        createdAt: "2026-05-30T09:01:00.000Z",
+      },
+    ]);
+
+    render(<App localPersistence={localPersistence} />);
+
+    const rightSide = screen.getByRole("region", { name: /right-side content switcher/i });
+    fireEvent.click(within(rightSide).getByRole("tab", { name: /ai conversation view/i }));
+    const aiConversationView = await within(rightSide).findByRole("region", {
+      name: /ai conversation view/i,
+    });
+
+    expect(aiConversationView).toHaveTextContent("Explain the customers query");
+    expect(aiConversationView).not.toHaveTextContent("Explain the orders query");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /open query session warehouse analytics select \* from orders/i,
+      }),
+    );
+
+    await waitFor(() => expect(aiConversationView).toHaveTextContent("Explain the orders query"));
+    expect(aiConversationView).not.toHaveTextContent("Explain the customers query");
+  });
+
+  it("sends an AI Conversation message with the Default Model Provider and appends it to the active SQL Console", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      modelProviders: [
+        {
+          id: "provider-1",
+          name: "Default OpenAI",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1200,
+          apiKeySecretId: "model-provider:provider-1:api-key",
+          isDefault: true,
+        },
+      ],
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+    });
+    await localPersistence.secrets.setSecret(
+      "model-provider:provider-1:api-key",
+      "sk-default-provider",
+    );
+    const inactiveConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(inactiveConsole.id, "select * from orders");
+    const activeConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(
+      activeConsole.id,
+      "select * from customers",
+    );
+    const aiConversationResponder = vi.fn(async () => "Use customers.customer_id for joins.");
+
+    render(
+      <App
+        localPersistence={localPersistence}
+        aiConversationResponder={aiConversationResponder}
+      />,
+    );
+
+    const rightSide = screen.getByRole("region", { name: /right-side content switcher/i });
+    fireEvent.click(within(rightSide).getByRole("tab", { name: /ai conversation view/i }));
+    const aiConversationView = await within(rightSide).findByRole("region", {
+      name: /ai conversation view/i,
+    });
+    fireEvent.change(within(aiConversationView).getByRole("textbox", { name: /ai message/i }), {
+      target: { value: "Which key should I use for this console?" },
+    });
+
+    fireEvent.click(within(aiConversationView).getByRole("button", { name: /send ai message/i }));
+
+    await waitFor(() =>
+      expect(aiConversationResponder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "Which key should I use for this console?",
+          apiKey: "sk-default-provider",
+          configuration: {
+            baseUrl: "https://api.openai.com/v1",
+            model: "gpt-5.5",
+            temperature: 0.2,
+            maxTokens: 1200,
+          },
+          session: expect.objectContaining({
+            id: activeConsole.id,
+            sqlDraft: "select * from customers",
+          }),
+        }),
+      ),
+    );
+    expect(aiConversationView).toHaveTextContent("Which key should I use for this console?");
+    expect(aiConversationView).toHaveTextContent("Use customers.customer_id for joins.");
+    await expect(localPersistence.querySessions.openQuerySession(activeConsole.id)).resolves
+      .toMatchObject({
+        aiConversationHistory: [
+          expect.objectContaining({
+            role: "user",
+            content: "Which key should I use for this console?",
+          }),
+          expect.objectContaining({
+            role: "assistant",
+            content: "Use customers.customer_id for joins.",
+          }),
+        ],
+      });
+    await expect(localPersistence.querySessions.openQuerySession(inactiveConsole.id)).resolves
+      .toMatchObject({
+        aiConversationHistory: [],
+      });
+  });
+
 
   it("restores the active SQL Console's latest result set when switching back to it", async () => {
     const localPersistence = createInMemoryLocalPersistence({
