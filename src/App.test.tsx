@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type {
@@ -428,6 +428,103 @@ describe("Glimpse app shell", () => {
     expect(screen.queryByText(/ssh tunnel/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/advanced ssl/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/bastion/i)).not.toBeInTheDocument();
+  });
+
+  it("manages multiple model providers with a saved-provider list and create/edit form", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      modelProviders: [
+        {
+          id: "provider-1",
+          name: "OpenAI",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1200,
+          apiKeySecretId: "model-provider:provider-1:api-key",
+          isDefault: true,
+        },
+        {
+          id: "provider-2",
+          name: "Local Proxy",
+          baseUrl: "https://ai.example.test/v1",
+          model: "glimpse-sql",
+          temperature: 0.1,
+          maxTokens: 800,
+          apiKeySecretId: "model-provider:provider-2:api-key",
+          isDefault: false,
+        },
+      ],
+    });
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /model provider management/i }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /model provider management/i,
+    });
+    const modelProviderDialog = within(dialog);
+    expect(dialog).toContainElement(
+      screen.getByRole("list", { name: /saved model providers/i }),
+    );
+    expect(dialog).toContainElement(
+      screen.getByRole("form", { name: /model provider form/i }),
+    );
+    expect(await screen.findByRole("button", { name: /openai default/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /local proxy/i })).toBeInTheDocument();
+
+    fireEvent.click(modelProviderDialog.getByRole("button", { name: /add model provider/i }));
+    expect(modelProviderDialog.getByLabelText(/provider name/i)).toHaveValue("");
+
+    fireEvent.change(modelProviderDialog.getByLabelText(/provider name/i), {
+      target: { value: "Anthropic Proxy" },
+    });
+    fireEvent.change(modelProviderDialog.getByLabelText(/base url/i), {
+      target: { value: "https://anthropic-proxy.example.test/v1" },
+    });
+    fireEvent.change(modelProviderDialog.getByLabelText(/api key/i), {
+      target: { value: "sk-provider-secret" },
+    });
+    fireEvent.change(modelProviderDialog.getByLabelText(/^model$/i), {
+      target: { value: "claude-sql" },
+    });
+    fireEvent.change(modelProviderDialog.getByLabelText(/temperature/i), {
+      target: { value: "0.3" },
+    });
+    fireEvent.change(modelProviderDialog.getByLabelText(/max tokens/i), {
+      target: { value: "1600" },
+    });
+    fireEvent.click(modelProviderDialog.getByLabelText(/default model provider/i));
+    fireEvent.click(modelProviderDialog.getByRole("button", { name: /save model provider/i }));
+
+    expect(await screen.findByRole("button", { name: /anthropic proxy default selected/i }))
+      .toBeInTheDocument();
+    expect(modelProviderDialog.getByLabelText(/provider name/i)).toHaveValue("Anthropic Proxy");
+
+    const providers = await localPersistence.modelProviders.listModelProviders();
+    const savedProvider = providers.find((provider) => provider.name === "Anthropic Proxy");
+    expect(savedProvider).toEqual(
+      expect.objectContaining({
+        baseUrl: "https://anthropic-proxy.example.test/v1",
+        model: "claude-sql",
+        isDefault: true,
+      }),
+    );
+    expect(savedProvider).not.toHaveProperty("apiKey");
+    await expect(localPersistence.modelProviders.getDefaultModelProvider()).resolves.toEqual(
+      expect.objectContaining({ name: "Anthropic Proxy" }),
+    );
+    await expect(localPersistence.secrets.getSecret(savedProvider!.apiKeySecretId)).resolves.toBe(
+      "sk-provider-secret",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /local proxy/i }));
+    fireEvent.click(screen.getByRole("button", { name: /set as default/i }));
+
+    expect(await screen.findByRole("button", { name: /local proxy default selected/i }))
+      .toBeInTheDocument();
+    await expect(localPersistence.modelProviders.getDefaultModelProvider()).resolves.toEqual(
+      expect.objectContaining({ id: "provider-2" }),
+    );
   });
 
   it("opens a saved connection and displays catalog from only its default schema", async () => {
@@ -999,6 +1096,73 @@ describe("Glimpse app shell", () => {
         session: expect.objectContaining({
           candidateTables: [{ name: "orders", reason: "Added by user" }],
         }),
+      }),
+    );
+  });
+
+  it("uses the selected default model provider for AI SQL capabilities", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      modelProviders: [
+        {
+          id: "provider-1",
+          name: "OpenAI",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1200,
+          apiKeySecretId: "model-provider:provider-1:api-key",
+          isDefault: false,
+        },
+        {
+          id: "provider-2",
+          name: "Default Proxy",
+          baseUrl: "https://default-proxy.example.test/v1",
+          model: "glimpse-sql-default",
+          temperature: 0.1,
+          maxTokens: 900,
+          apiKeySecretId: "model-provider:provider-2:api-key",
+          isDefault: true,
+        },
+      ],
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => warehouseCatalogWithCustomers,
+    });
+    await localPersistence.secrets.setSecret(
+      "model-provider:provider-2:api-key",
+      "sk-default-provider",
+    );
+    const sqlGenerator = vi.fn(async () => "select count(*) from orders");
+
+    render(<App localPersistence={localPersistence} sqlGenerator={sqlGenerator} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    expect(await screen.findByText("customers")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /query need/i }), {
+      target: { value: "Count orders" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /generate sql/i }));
+
+    await screen.findByDisplayValue("select count(*) from orders");
+    expect(sqlGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        configuration: {
+          baseUrl: "https://default-proxy.example.test/v1",
+          model: "glimpse-sql-default",
+          temperature: 0.1,
+          maxTokens: 900,
+        },
+        apiKey: "sk-default-provider",
       }),
     );
   });

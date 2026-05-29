@@ -89,6 +89,102 @@ describe("local persistence boundary", () => {
     ]);
   });
 
+  it("routes multiple model providers through metadata commands while keeping API keys in secrets", async () => {
+    const calls: Array<{ command: string; args?: unknown }> = [];
+    const localPersistence = createTauriLocalPersistence(async (command, args) => {
+      calls.push({ command, args });
+
+      if (command === "list_model_providers") {
+        return [
+          {
+            id: "provider-1",
+            name: "OpenAI",
+            baseUrl: "https://api.openai.com/v1",
+            model: "gpt-5.5",
+            temperature: 0.2,
+            maxTokens: 1200,
+            apiKeySecretId: "model-provider:provider-1:api-key",
+            isDefault: true,
+          },
+          {
+            id: "provider-2",
+            name: "Local Proxy",
+            baseUrl: "https://ai.example.test/v1",
+            model: "glimpse-sql",
+            temperature: 0.1,
+            maxTokens: 800,
+            apiKeySecretId: "model-provider:provider-2:api-key",
+            isDefault: false,
+          },
+        ];
+      }
+
+      if (command === "get_default_model_provider") {
+        return {
+          id: "provider-1",
+          name: "OpenAI",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-5.5",
+          temperature: 0.2,
+          maxTokens: 1200,
+          apiKeySecretId: "model-provider:provider-1:api-key",
+          isDefault: true,
+        };
+      }
+
+      return null;
+    });
+
+    await expect(localPersistence.modelProviders.listModelProviders()).resolves.toHaveLength(2);
+    await localPersistence.modelProviders.saveModelProvider({
+      id: "provider-3",
+      name: "Anthropic Proxy",
+      baseUrl: "https://anthropic-proxy.example.test/v1",
+      model: "claude-sql",
+      temperature: 0.3,
+      maxTokens: 1600,
+      apiKey: "sk-provider-secret",
+      isDefault: true,
+    });
+    await expect(localPersistence.modelProviders.getDefaultModelProvider()).resolves.toEqual(
+      expect.objectContaining({ id: "provider-1", isDefault: true }),
+    );
+    await localPersistence.modelProviders.setDefaultModelProvider("provider-2");
+
+    const metadataCalls = calls.filter(({ command }) => command !== "set_secret");
+    expect(JSON.stringify(metadataCalls)).not.toContain("sk-provider-secret");
+    expect(calls).toEqual([
+      { command: "list_model_providers", args: undefined },
+      {
+        command: "save_model_provider",
+        args: {
+          provider: {
+            id: "provider-3",
+            name: "Anthropic Proxy",
+            baseUrl: "https://anthropic-proxy.example.test/v1",
+            model: "claude-sql",
+            temperature: 0.3,
+            maxTokens: 1600,
+            apiKeySecretId: "model-provider:provider-3:api-key",
+            isDefault: true,
+          },
+        },
+      },
+      {
+        command: "set_secret",
+        args: {
+          secretId: "model-provider:provider-3:api-key",
+          secretValue: "sk-provider-secret",
+        },
+      },
+      { command: "get_default_model_provider", args: undefined },
+      {
+        command: "set_default_model_provider",
+        args: { providerId: "provider-2" },
+      },
+    ]);
+  });
+
   it("keeps database passwords and AI API keys out of SQLite command payloads", async () => {
     const calls: Array<{ command: string; args?: unknown }> = [];
     const localPersistence = createTauriLocalPersistence(async (command, args) => {
@@ -228,6 +324,42 @@ describe("local persistence boundary", () => {
       },
       { command: "delete_database_connection", args: { id: "db-2" } },
     ]);
+  });
+
+  it("does not route per-connection model provider configuration with database connections", async () => {
+    const calls: Array<{ command: string; args?: unknown }> = [];
+    const localPersistence = createTauriLocalPersistence(async (command, args) => {
+      calls.push({ command, args });
+      return null;
+    });
+
+    await localPersistence.databaseConnections.saveDatabaseConnection({
+      id: "db-1",
+      name: "Warehouse",
+      host: "warehouse.internal",
+      port: 3306,
+      username: "readonly",
+      password: "database-password",
+      defaultDatabase: "warehouse",
+      // @ts-expect-error Database connections must not carry provider binding metadata.
+      modelProviderId: "provider-1",
+    });
+
+    expect(JSON.stringify(calls)).not.toContain("provider-1");
+    expect(calls).toContainEqual({
+      command: "save_database_connection",
+      args: {
+        connection: {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      },
+    });
   });
 
   it("routes catalog open and manual refresh through metadata commands while SQL generation uses only cached catalog", async () => {

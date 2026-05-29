@@ -150,12 +150,68 @@ body {
   overflow: auto;
 }
 
+.model-provider-dialog {
+  width: min(920px, 100%);
+}
+
 .data-source-dialog {
   width: min(880px, 100%);
 }
 
 .dialog .panel-title {
   justify-content: space-between;
+}
+
+.management-layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 480px;
+}
+
+.management-list-pane {
+  border-right: 1px solid var(--divider);
+  min-width: 0;
+}
+
+.management-toolbar {
+  padding: 12px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.provider-list {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.provider-list-item {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+}
+
+.provider-list-item[aria-pressed="true"] {
+  border-color: #3a9a7a;
+}
+
+.provider-list-item span,
+.provider-list-item small {
+  color: var(--muted);
+}
+
+.management-form {
+  padding-bottom: 12px;
+}
+
+.checkbox-field {
+  margin: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .management-dialog-body {
