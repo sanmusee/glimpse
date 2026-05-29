@@ -93,6 +93,19 @@ struct GlobalAiConfiguration {
     max_tokens: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelProviderRecord {
+    id: String,
+    name: String,
+    base_url: String,
+    model: String,
+    temperature: f64,
+    max_tokens: i64,
+    api_key_secret_id: String,
+    is_default: bool,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct QuerySessionCreateInput {
@@ -210,6 +223,24 @@ fn open_local_store(app: &tauri::AppHandle) -> Result<Connection, String> {
 
     connection
         .execute(
+            "CREATE TABLE IF NOT EXISTS model_providers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                max_tokens INTEGER NOT NULL,
+                api_key_secret_id TEXT NOT NULL,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .map_err(|error| format!("failed to prepare model providers table: {error}"))?;
+
+    connection
+        .execute(
             "CREATE TABLE IF NOT EXISTS database_connections (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -317,6 +348,26 @@ fn validate_database_connection(connection: &DatabaseConnectionRecord) -> Result
 
     if connection.default_database.trim().is_empty() {
         return Err("default database/schema is required".to_string());
+    }
+
+    Ok(())
+}
+
+fn validate_model_provider(provider: &ModelProviderRecord) -> Result<(), String> {
+    if provider.name.trim().is_empty() {
+        return Err("model provider name is required".to_string());
+    }
+
+    if provider.base_url.trim().is_empty() {
+        return Err("model provider base URL is required".to_string());
+    }
+
+    if provider.model.trim().is_empty() {
+        return Err("model provider model is required".to_string());
+    }
+
+    if provider.api_key_secret_id.trim().is_empty() {
+        return Err("model provider API key secret id is required".to_string());
     }
 
     Ok(())
@@ -902,6 +953,148 @@ fn save_global_ai_configuration(
         .map_err(|error| format!("failed to save global AI configuration: {error}"))?;
 
     Ok(())
+}
+
+#[tauri::command]
+fn list_model_providers(app: tauri::AppHandle) -> Result<Vec<ModelProviderRecord>, String> {
+    let connection = open_local_store(&app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, name, base_url, model, temperature, max_tokens, api_key_secret_id, is_default
+             FROM model_providers
+             ORDER BY is_default DESC, updated_at DESC, name ASC",
+        )
+        .map_err(|error| format!("failed to prepare model provider query: {error}"))?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(ModelProviderRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                base_url: row.get(2)?,
+                model: row.get(3)?,
+                temperature: row.get(4)?,
+                max_tokens: row.get(5)?,
+                api_key_secret_id: row.get(6)?,
+                is_default: row.get::<_, i64>(7)? == 1,
+            })
+        })
+        .map_err(|error| format!("failed to read model providers: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to parse model providers: {error}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn save_model_provider(
+    app: tauri::AppHandle,
+    provider: ModelProviderRecord,
+) -> Result<ModelProviderRecord, String> {
+    validate_model_provider(&provider)?;
+    let mut connection = open_local_store(&app)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("failed to start model provider transaction: {error}"))?;
+
+    if provider.is_default {
+        transaction
+            .execute("UPDATE model_providers SET is_default = 0", [])
+            .map_err(|error| format!("failed to clear default model provider: {error}"))?;
+    }
+
+    transaction
+        .execute(
+            "INSERT INTO model_providers (
+                id, name, base_url, model, temperature, max_tokens, api_key_secret_id, is_default, updated_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                base_url = excluded.base_url,
+                model = excluded.model,
+                temperature = excluded.temperature,
+                max_tokens = excluded.max_tokens,
+                api_key_secret_id = excluded.api_key_secret_id,
+                is_default = excluded.is_default,
+                updated_at = CURRENT_TIMESTAMP",
+            params![
+                &provider.id,
+                &provider.name,
+                &provider.base_url,
+                &provider.model,
+                provider.temperature,
+                provider.max_tokens,
+                &provider.api_key_secret_id,
+                if provider.is_default { 1 } else { 0 }
+            ],
+        )
+        .map_err(|error| format!("failed to save model provider: {error}"))?;
+
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit model provider transaction: {error}"))?;
+
+    Ok(provider)
+}
+
+#[tauri::command]
+fn get_default_model_provider(app: tauri::AppHandle) -> Result<Option<ModelProviderRecord>, String> {
+    let connection = open_local_store(&app)?;
+    connection
+        .query_row(
+            "SELECT id, name, base_url, model, temperature, max_tokens, api_key_secret_id, is_default
+             FROM model_providers
+             WHERE is_default = 1
+             ORDER BY updated_at DESC
+             LIMIT 1",
+            [],
+            |row| {
+                Ok(ModelProviderRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    base_url: row.get(2)?,
+                    model: row.get(3)?,
+                    temperature: row.get(4)?,
+                    max_tokens: row.get(5)?,
+                    api_key_secret_id: row.get(6)?,
+                    is_default: row.get::<_, i64>(7)? == 1,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("failed to read default model provider: {error}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_default_model_provider(app: tauri::AppHandle, provider_id: String) -> Result<(), String> {
+    let mut connection = open_local_store(&app)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("failed to start default model provider transaction: {error}"))?;
+    let exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM model_providers WHERE id = ?1)",
+            [&provider_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("failed to find model provider: {error}"))?;
+
+    if !exists {
+        return Err("model provider was not found".to_string());
+    }
+
+    transaction
+        .execute(
+            "UPDATE model_providers
+             SET is_default = CASE WHEN id = ?1 THEN 1 ELSE 0 END,
+                 updated_at = CASE WHEN id = ?1 THEN CURRENT_TIMESTAMP ELSE updated_at END",
+            [&provider_id],
+        )
+        .map_err(|error| format!("failed to set default model provider: {error}"))?;
+
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit default model provider transaction: {error}"))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1523,6 +1716,10 @@ pub fn run() {
             set_theme_preference,
             get_global_ai_configuration,
             save_global_ai_configuration,
+            list_model_providers,
+            save_model_provider,
+            get_default_model_provider,
+            set_default_model_provider,
             get_secret,
             set_secret,
             delete_secret,

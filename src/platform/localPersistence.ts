@@ -13,6 +13,21 @@ export interface GlobalAiConfiguration {
   maxTokens: number;
 }
 
+export interface ModelProvider extends GlobalAiConfiguration {
+  id: string;
+  name: string;
+  apiKeySecretId: string;
+  isDefault: boolean;
+}
+
+export interface ModelProviderInput extends GlobalAiConfiguration {
+  id?: string;
+  name: string;
+  apiKeySecretId?: string;
+  apiKey?: string;
+  isDefault?: boolean;
+}
+
 export interface PreferenceStore {
   getThemePreference(): Promise<ThemePreference>;
   setThemePreference(themePreference: ThemePreference): Promise<void>;
@@ -21,6 +36,13 @@ export interface PreferenceStore {
 export interface AiConfigurationStore {
   getGlobalAiConfiguration(): Promise<GlobalAiConfiguration | null>;
   saveGlobalAiConfiguration(configuration: GlobalAiConfiguration): Promise<void>;
+}
+
+export interface ModelProviderStore {
+  listModelProviders(): Promise<ModelProvider[]>;
+  saveModelProvider(input: ModelProviderInput): Promise<ModelProvider>;
+  getDefaultModelProvider(): Promise<ModelProvider | null>;
+  setDefaultModelProvider(providerId: string): Promise<void>;
 }
 
 export interface SecretStore {
@@ -180,6 +202,7 @@ export interface QuerySessionStore {
 export interface LocalPersistence {
   preferences: PreferenceStore;
   aiConfiguration: AiConfigurationStore;
+  modelProviders: ModelProviderStore;
   secrets: SecretStore;
   databaseConnections: DatabaseConnectionStore;
   databaseCatalogs: DatabaseCatalogStore;
@@ -194,6 +217,7 @@ export function isThemePreference(value: unknown): value is ThemePreference {
 export function createInMemoryLocalPersistence(initial?: {
   themePreference?: ThemePreference;
   aiConfiguration?: GlobalAiConfiguration | null;
+  modelProviders?: ModelProvider[];
   databaseConnections?: DatabaseConnection[];
   testDatabaseConnection?: (
     input: DatabaseConnectionInput,
@@ -207,6 +231,9 @@ export function createInMemoryLocalPersistence(initial?: {
 }): LocalPersistence {
   let themePreference = initial?.themePreference ?? "system";
   let aiConfiguration = initial?.aiConfiguration ?? null;
+  const modelProviders = new Map<string, ModelProvider>(
+    initial?.modelProviders?.map((provider) => [provider.id, provider]) ?? [],
+  );
   const secrets = new Map<string, string>();
   const databaseConnections = new Map<string, DatabaseConnection>(
     initial?.databaseConnections?.map((connection) => [connection.id, connection]) ?? [],
@@ -250,6 +277,52 @@ export function createInMemoryLocalPersistence(initial?: {
       },
       async saveGlobalAiConfiguration(nextConfiguration) {
         aiConfiguration = nextConfiguration;
+      },
+    },
+    modelProviders: {
+      async listModelProviders() {
+        return Array.from(modelProviders.values()).sort((left, right) =>
+          Number(right.isDefault) - Number(left.isDefault),
+        );
+      },
+      async saveModelProvider(input) {
+        const id = input.id ?? createLocalId();
+        const apiKeySecretId = input.apiKeySecretId ?? `model-provider:${id}:api-key`;
+        const savedProvider: ModelProvider = {
+          id,
+          name: input.name,
+          baseUrl: input.baseUrl,
+          model: input.model,
+          temperature: input.temperature,
+          maxTokens: input.maxTokens,
+          apiKeySecretId,
+          isDefault: Boolean(input.isDefault),
+        };
+
+        if (savedProvider.isDefault) {
+          for (const provider of modelProviders.values()) {
+            modelProviders.set(provider.id, { ...provider, isDefault: false });
+          }
+        }
+
+        modelProviders.set(id, savedProvider);
+
+        if (input.apiKey) {
+          secrets.set(apiKeySecretId, input.apiKey);
+        }
+
+        return savedProvider;
+      },
+      async getDefaultModelProvider() {
+        return Array.from(modelProviders.values()).find((provider) => provider.isDefault) ?? null;
+      },
+      async setDefaultModelProvider(providerId) {
+        for (const provider of modelProviders.values()) {
+          modelProviders.set(provider.id, {
+            ...provider,
+            isDefault: provider.id === providerId,
+          });
+        }
       },
     },
     secrets: {
@@ -488,6 +561,41 @@ export function createTauriLocalPersistence(invoke: TauriInvoke = tauriInvoke): 
         await invoke("save_global_ai_configuration", { configuration });
       },
     },
+    modelProviders: {
+      async listModelProviders() {
+        const providers = await invoke("list_model_providers");
+        return Array.isArray(providers) ? (providers as ModelProvider[]) : [];
+      },
+      async saveModelProvider(input) {
+        const id = input.id ?? createLocalId();
+        const apiKeySecretId = input.apiKeySecretId ?? `model-provider:${id}:api-key`;
+        const provider: ModelProvider = {
+          id,
+          name: input.name,
+          baseUrl: input.baseUrl,
+          model: input.model,
+          temperature: input.temperature,
+          maxTokens: input.maxTokens,
+          apiKeySecretId,
+          isDefault: Boolean(input.isDefault),
+        };
+
+        await invoke("save_model_provider", { provider });
+
+        if (input.apiKey) {
+          await invoke("set_secret", { secretId: apiKeySecretId, secretValue: input.apiKey });
+        }
+
+        return provider;
+      },
+      async getDefaultModelProvider() {
+        const provider = await invoke("get_default_model_provider");
+        return isModelProvider(provider) ? provider : null;
+      },
+      async setDefaultModelProvider(providerId) {
+        await invoke("set_default_model_provider", { providerId });
+      },
+    },
     secrets: {
       async getSecret(secretId) {
         const secretValue = await invoke("get_secret", { secretId });
@@ -632,12 +740,26 @@ function isGlobalAiConfiguration(value: unknown): value is GlobalAiConfiguration
     return false;
   }
 
-  const candidate = value as Record<string, unknown>;
+  const candidate = value as unknown as Record<string, unknown>;
   return (
     typeof candidate.baseUrl === "string" &&
     typeof candidate.model === "string" &&
     typeof candidate.temperature === "number" &&
     typeof candidate.maxTokens === "number"
+  );
+}
+
+function isModelProvider(value: unknown): value is ModelProvider {
+  if (!isGlobalAiConfiguration(value)) {
+    return false;
+  }
+
+  const candidate = value as unknown as Record<string, unknown>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.name === "string" &&
+    typeof candidate.apiKeySecretId === "string" &&
+    typeof candidate.isDefault === "boolean"
   );
 }
 

@@ -26,6 +26,8 @@ import {
   type ExecutionResultMetadata,
   type GlobalAiConfiguration,
   type LocalPersistence,
+  type ModelProvider,
+  type ModelProviderInput,
   type QuerySession,
   type SqlResultCellValue,
   type SqlResultRow,
@@ -55,6 +57,18 @@ interface AiConfigurationFormState {
   maxTokens: string;
 }
 
+interface ModelProviderFormState {
+  id?: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  apiKeySecretId?: string;
+  model: string;
+  temperature: string;
+  maxTokens: string;
+  isDefault: boolean;
+}
+
 interface CurrentResultSet {
   columns: string[];
   rows: SqlResultRow[];
@@ -66,6 +80,16 @@ const emptyAiConfigurationForm: AiConfigurationFormState = {
   model: "",
   temperature: "0.2",
   maxTokens: "1000",
+};
+
+const emptyModelProviderForm: ModelProviderFormState = {
+  name: "",
+  baseUrl: "",
+  apiKey: "",
+  model: "",
+  temperature: "0.2",
+  maxTokens: "1000",
+  isDefault: false,
 };
 
 const emptyDatabaseConnectionForm: DatabaseConnectionInput = {
@@ -99,6 +123,11 @@ export function App({
   );
   const [aiConfigurationStatus, setAiConfigurationStatus] = useState("Not configured");
   const [aiProviderTestStatus, setAiProviderTestStatus] = useState("");
+  const [modelProviders, setModelProviders] = useState<ModelProvider[]>([]);
+  const [selectedModelProviderId, setSelectedModelProviderId] = useState<string | null>(null);
+  const [modelProviderForm, setModelProviderForm] =
+    useState<ModelProviderFormState>(emptyModelProviderForm);
+  const [modelProviderStatus, setModelProviderStatus] = useState("");
   const [queryNeed, setQueryNeed] = useState("");
   const [modificationIntent, setModificationIntent] = useState("");
   const [candidateTableStatus, setCandidateTableStatus] = useState("");
@@ -110,7 +139,9 @@ export function App({
   const [selectedCandidateTableName, setSelectedCandidateTableName] = useState("");
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
   const [selectedDataSourceId, setSelectedDataSourceId] = useState<string | null>(null);
-  const [activeDialog, setActiveDialog] = useState<"dataSources" | "preferences" | null>(null);
+  const [activeDialog, setActiveDialog] = useState<
+    "dataSources" | "modelProviders" | "preferences" | null
+  >(null);
   const userSelectedThemePreference = useRef(false);
 
   useEffect(() => {
@@ -123,6 +154,28 @@ export function App({
 
       setThemePreference(storedThemePreference);
       document.documentElement.setAttribute("data-theme", storedThemePreference);
+    });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [localPersistence]);
+
+  useEffect(() => {
+    let isCurrent = true;
+
+    localPersistence.modelProviders.listModelProviders().then((providers) => {
+      if (!isCurrent) {
+        return;
+      }
+
+      setModelProviders(providers);
+      const selectedProvider =
+        providers.find((provider) => provider.isDefault) ?? providers[0] ?? null;
+      setSelectedModelProviderId(selectedProvider?.id ?? null);
+      setModelProviderForm(
+        selectedProvider ? modelProviderToForm(selectedProvider) : emptyModelProviderForm,
+      );
     });
 
     return () => {
@@ -321,6 +374,29 @@ export function App({
     setCurrentResultSet(null);
   };
 
+  const getDefaultAiProviderCredentials = async () => {
+    const defaultProvider = await localPersistence.modelProviders.getDefaultModelProvider();
+
+    if (defaultProvider) {
+      return {
+        configuration: modelProviderToConfiguration(defaultProvider),
+        apiKey: await localPersistence.secrets.getSecret(defaultProvider.apiKeySecretId),
+      };
+    }
+
+    return {
+      configuration: {
+        baseUrl: aiConfigurationForm.baseUrl.trim(),
+        model: aiConfigurationForm.model.trim(),
+        temperature: Number(aiConfigurationForm.temperature),
+        maxTokens: Number(aiConfigurationForm.maxTokens),
+      },
+      apiKey:
+        aiConfigurationForm.apiKey ||
+        (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID)),
+    };
+  };
+
   const openQuerySession = async (session: QuerySession) => {
     const openedSession = await localPersistence.querySessions.openQuerySession(session.id);
 
@@ -414,15 +490,7 @@ export function App({
       return;
     }
 
-    const configuration: GlobalAiConfiguration = {
-      baseUrl: aiConfigurationForm.baseUrl.trim(),
-      model: aiConfigurationForm.model.trim(),
-      temperature: Number(aiConfigurationForm.temperature),
-      maxTokens: Number(aiConfigurationForm.maxTokens),
-    };
-    const apiKey =
-      aiConfigurationForm.apiKey ||
-      (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID));
+    const { configuration, apiKey } = await getDefaultAiProviderCredentials();
 
     if (!configuration.baseUrl || !configuration.model || !apiKey) {
       setCandidateTableStatus("AI configuration and API key are required");
@@ -461,15 +529,7 @@ export function App({
       return;
     }
 
-    const configuration: GlobalAiConfiguration = {
-      baseUrl: aiConfigurationForm.baseUrl.trim(),
-      model: aiConfigurationForm.model.trim(),
-      temperature: Number(aiConfigurationForm.temperature),
-      maxTokens: Number(aiConfigurationForm.maxTokens),
-    };
-    const apiKey =
-      aiConfigurationForm.apiKey ||
-      (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID));
+    const { configuration, apiKey } = await getDefaultAiProviderCredentials();
 
     if (!configuration.baseUrl || !configuration.model || !apiKey) {
       setSqlGenerationStatus("AI configuration and API key are required");
@@ -549,15 +609,7 @@ export function App({
       return;
     }
 
-    const configuration: GlobalAiConfiguration = {
-      baseUrl: aiConfigurationForm.baseUrl.trim(),
-      model: aiConfigurationForm.model.trim(),
-      temperature: Number(aiConfigurationForm.temperature),
-      maxTokens: Number(aiConfigurationForm.maxTokens),
-    };
-    const apiKey =
-      aiConfigurationForm.apiKey ||
-      (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID));
+    const { configuration, apiKey } = await getDefaultAiProviderCredentials();
 
     if (!configuration.baseUrl || !configuration.model || !apiKey) {
       setSqlGenerationStatus("AI configuration and API key are required");
@@ -720,15 +772,7 @@ export function App({
       return;
     }
 
-    const configuration: GlobalAiConfiguration = {
-      baseUrl: aiConfigurationForm.baseUrl.trim(),
-      model: aiConfigurationForm.model.trim(),
-      temperature: Number(aiConfigurationForm.temperature),
-      maxTokens: Number(aiConfigurationForm.maxTokens),
-    };
-    const apiKey =
-      aiConfigurationForm.apiKey ||
-      (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID));
+    const { configuration, apiKey } = await getDefaultAiProviderCredentials();
 
     if (!configuration.baseUrl || !configuration.model || !apiKey) {
       setSqlGenerationStatus("AI configuration and API key are required");
@@ -837,6 +881,70 @@ export function App({
     }));
   };
 
+  const updateModelProviderForm = (
+    field: keyof ModelProviderFormState,
+    value: string | boolean,
+  ) => {
+    setModelProviderForm((currentForm) => ({
+      ...currentForm,
+      [field]: value,
+    }));
+  };
+
+  const addModelProvider = () => {
+    setSelectedModelProviderId(null);
+    setModelProviderForm(emptyModelProviderForm);
+    setModelProviderStatus("");
+  };
+
+  const selectModelProvider = (provider: ModelProvider) => {
+    setSelectedModelProviderId(provider.id);
+    setModelProviderForm(modelProviderToForm(provider));
+    setModelProviderStatus("");
+  };
+
+  const saveModelProvider = async () => {
+    const input: ModelProviderInput = {
+      id: modelProviderForm.id,
+      name: modelProviderForm.name.trim(),
+      baseUrl: modelProviderForm.baseUrl.trim(),
+      model: modelProviderForm.model.trim(),
+      temperature: Number(modelProviderForm.temperature),
+      maxTokens: Number(modelProviderForm.maxTokens),
+      apiKeySecretId: modelProviderForm.apiKeySecretId,
+      apiKey: modelProviderForm.apiKey.trim(),
+      isDefault: modelProviderForm.isDefault,
+    };
+    const savedProvider = await localPersistence.modelProviders.saveModelProvider(input);
+
+    if (savedProvider.isDefault) {
+      await localPersistence.modelProviders.setDefaultModelProvider(savedProvider.id);
+    }
+
+    const refreshedProviders = await localPersistence.modelProviders.listModelProviders();
+    setModelProviders(refreshedProviders);
+    setSelectedModelProviderId(savedProvider.id);
+    setModelProviderForm(modelProviderToForm(savedProvider));
+    setModelProviderStatus("Model provider saved");
+  };
+
+  const setSelectedModelProviderAsDefault = async () => {
+    if (!selectedModelProviderId) {
+      return;
+    }
+
+    await localPersistence.modelProviders.setDefaultModelProvider(selectedModelProviderId);
+    const refreshedProviders = await localPersistence.modelProviders.listModelProviders();
+    const selectedProvider =
+      refreshedProviders.find((provider) => provider.id === selectedModelProviderId) ?? null;
+
+    setModelProviders(refreshedProviders);
+    if (selectedProvider) {
+      setModelProviderForm(modelProviderToForm(selectedProvider));
+    }
+    setModelProviderStatus("Default model provider updated");
+  };
+
   const saveAiConfiguration = async () => {
     const configuration: GlobalAiConfiguration = {
       baseUrl: aiConfigurationForm.baseUrl.trim(),
@@ -889,7 +997,9 @@ export function App({
         <button type="button" onClick={() => setActiveDialog("dataSources")}>
           Data Source Management
         </button>
-        <button type="button">Model Provider Management</button>
+        <button type="button" onClick={() => setActiveDialog("modelProviders")}>
+          Model Provider Management
+        </button>
         <button
           type="button"
           onClick={() => databaseConnections[0] && createQuerySession(databaseConnections[0])}
@@ -1493,6 +1603,149 @@ export function App({
         </div>
       ) : null}
 
+      {activeDialog === "modelProviders" ? (
+        <div className="dialog-backdrop">
+          <section
+            aria-label="Model Provider Management"
+            role="dialog"
+            aria-modal="true"
+            className="dialog model-provider-dialog panel"
+          >
+            <div className="panel-title">
+              <span>Model Provider Management</span>
+              <button type="button" onClick={() => setActiveDialog(null)}>
+                Close
+              </button>
+            </div>
+            <div className="management-layout">
+              <aside className="management-list-pane">
+                <div className="management-toolbar">
+                  <button type="button" onClick={addModelProvider}>
+                    Add model provider
+                  </button>
+                </div>
+                <div className="provider-list" role="list" aria-label="Saved model providers">
+                  {modelProviders.length === 0 ? (
+                    <div className="placeholder-row">No saved model providers yet</div>
+                  ) : (
+                    modelProviders.map((provider) => (
+                      <button
+                        className="provider-list-item"
+                        type="button"
+                        aria-label={`${provider.name}${provider.isDefault ? " default" : ""}${
+                          provider.id === selectedModelProviderId ? " selected" : ""
+                        }`}
+                        aria-pressed={provider.id === selectedModelProviderId}
+                        key={provider.id}
+                        onClick={() => selectModelProvider(provider)}
+                      >
+                        <strong>{provider.name}</strong>
+                        <span>{provider.model}</span>
+                        {provider.isDefault ? <small>Default</small> : null}
+                      </button>
+                    ))
+                  )}
+                </div>
+              </aside>
+              <form
+                className="management-form"
+                aria-label="Model provider form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  saveModelProvider();
+                }}
+              >
+                <label className="field">
+                  <span>Provider name</span>
+                  <input
+                    value={modelProviderForm.name}
+                    onChange={(event) => updateModelProviderForm("name", event.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Base URL</span>
+                  <input
+                    value={modelProviderForm.baseUrl}
+                    onChange={(event) => updateModelProviderForm("baseUrl", event.target.value)}
+                    placeholder="https://api.openai.com/v1"
+                  />
+                </label>
+                <label className="field">
+                  <span>API key</span>
+                  <input
+                    type="password"
+                    value={modelProviderForm.apiKey}
+                    onChange={(event) => updateModelProviderForm("apiKey", event.target.value)}
+                    placeholder={
+                      modelProviderForm.apiKeySecretId ? "Stored in Keychain" : "Paste API key"
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Model</span>
+                  <input
+                    value={modelProviderForm.model}
+                    onChange={(event) => updateModelProviderForm("model", event.target.value)}
+                    placeholder="gpt-5.5"
+                  />
+                </label>
+                <div className="field-grid">
+                  <label className="field compact-field">
+                    <span>Temperature</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="2"
+                      value={modelProviderForm.temperature}
+                      onChange={(event) =>
+                        updateModelProviderForm("temperature", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="field compact-field">
+                    <span>Max tokens</span>
+                    <input
+                      type="number"
+                      min="1"
+                      value={modelProviderForm.maxTokens}
+                      onChange={(event) =>
+                        updateModelProviderForm("maxTokens", event.target.value)
+                      }
+                    />
+                  </label>
+                </div>
+                <label className="checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={modelProviderForm.isDefault}
+                    onChange={(event) =>
+                      updateModelProviderForm("isDefault", event.target.checked)
+                    }
+                  />
+                  <span>Default model provider</span>
+                </label>
+                <div className="form-actions">
+                  <button className="primary-action" type="submit">
+                    Save model provider
+                  </button>
+                  <button
+                    type="button"
+                    onClick={setSelectedModelProviderAsDefault}
+                    disabled={!selectedModelProviderId}
+                  >
+                    Set as default
+                  </button>
+                </div>
+                {modelProviderStatus ? (
+                  <div className="status-line">{modelProviderStatus}</div>
+                ) : null}
+              </form>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {activeDialog === "preferences" ? (
         <div className="dialog-backdrop">
           <section
@@ -1605,6 +1858,29 @@ function formatResultSetForCopy(resultSet: CurrentResultSet) {
     resultSet.columns.join("\t"),
     ...resultSet.rows.map((row) => formatResultRowForCopy(row)),
   ].join("\n");
+}
+
+function modelProviderToForm(provider: ModelProvider): ModelProviderFormState {
+  return {
+    id: provider.id,
+    name: provider.name,
+    baseUrl: provider.baseUrl,
+    apiKey: "",
+    apiKeySecretId: provider.apiKeySecretId,
+    model: provider.model,
+    temperature: String(provider.temperature),
+    maxTokens: String(provider.maxTokens),
+    isDefault: provider.isDefault,
+  };
+}
+
+function modelProviderToConfiguration(provider: ModelProvider): GlobalAiConfiguration {
+  return {
+    baseUrl: provider.baseUrl,
+    model: provider.model,
+    temperature: provider.temperature,
+    maxTokens: provider.maxTokens,
+  };
 }
 
 function formatResultRowForCopy(row: SqlResultRow) {
