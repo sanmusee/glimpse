@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import type { GenerateSqlFromQueryNeedInput } from "./sqlGeneration";
 import {
   AI_PROVIDER_API_KEY_SECRET_ID,
   createInMemoryLocalPersistence,
@@ -587,6 +588,89 @@ describe("Glimpse app shell", () => {
       expect.objectContaining({
         queryNeed: "Find monthly order totals",
         apiKey: "sk-test-secret",
+      }),
+    );
+  });
+
+  it("generates SQL from the query need, streams it into the editor, and persists the conversation without executing", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      aiConfiguration: {
+        baseUrl: "https://ai.example.test/v1",
+        model: "glimpse-sql",
+        temperature: 0.2,
+        maxTokens: 1000,
+      },
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => warehouseCatalogWithCustomers,
+    });
+    await localPersistence.secrets.setSecret(AI_PROVIDER_API_KEY_SECRET_ID, "sk-test-secret");
+    const sqlGenerator = vi.fn(async ({ onPartialSql }: GenerateSqlFromQueryNeedInput) => {
+      onPartialSql?.("select customer_id");
+      onPartialSql?.(
+        "select customer_id, count(*) as order_count from orders group by customer_id",
+      );
+
+      return "select customer_id, count(*) as order_count from orders group by customer_id";
+    });
+
+    render(<App localPersistence={localPersistence} sqlGenerator={sqlGenerator} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    expect(await screen.findByText("customers")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /query need/i }), {
+      target: { value: "Count orders by customer" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: /add candidate table/i }), {
+      target: { value: "orders" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^add candidate table$/i }));
+    expect(await screen.findByRole("button", { name: /remove orders/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /generate sql/i }));
+
+    const sqlEditor = await screen.findByRole("textbox", { name: /sql draft/i });
+    await waitFor(() =>
+      expect(sqlEditor).toHaveValue(
+        "select customer_id, count(*) as order_count from orders group by customer_id",
+      ),
+    );
+    expect(await screen.findByRole("button", { name: /run generated sql manually/i }))
+      .toBeInTheDocument();
+    expect(screen.getByText(/no query has run/i)).toBeInTheDocument();
+    expect(screen.queryByText(/sql explanation/i)).not.toBeInTheDocument();
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      sqlDraft: "select customer_id, count(*) as order_count from orders group by customer_id",
+      aiConversationHistory: [
+        expect.objectContaining({
+          role: "user",
+          content: "Count orders by customer",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          content:
+            "select customer_id, count(*) as order_count from orders group by customer_id",
+        }),
+      ],
+      executionResultMetadata: [],
+    });
+    expect(sqlGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryNeed: "Count orders by customer",
+        apiKey: "sk-test-secret",
+        session: expect.objectContaining({
+          candidateTables: [{ name: "orders", reason: "Added by user" }],
+        }),
       }),
     );
   });
