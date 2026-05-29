@@ -59,8 +59,28 @@ describe("candidate table discovery", () => {
       session,
       catalog,
     });
+    const userContext = parseUserContext(request);
     const serializedRequest = JSON.stringify(request);
 
+    expect(userContext).toEqual({
+      queryNeed: "Find total customer orders",
+      querySession: {
+        id: "session-1",
+        defaultDatabase: "warehouse",
+      },
+      defaultSchemaCatalog: {
+        database: "warehouse",
+        tables: [
+          expect.objectContaining({
+            name: "orders",
+            createTableDdl: "CREATE TABLE `orders` (`id` bigint NOT NULL)",
+          }),
+        ],
+      },
+    });
+    expect(userContext.querySession).not.toHaveProperty("sqlDraft");
+    expect(userContext.querySession).not.toHaveProperty("aiConversationHistory");
+    expect(userContext.querySession).not.toHaveProperty("executionResultMetadata");
     expect(serializedRequest).toContain("Find total customer orders");
     expect(serializedRequest).toContain("warehouse");
     expect(serializedRequest).toContain("orders");
@@ -145,3 +165,16 @@ describe("candidate table discovery", () => {
     expect(String(requestInit.body)).not.toContain("sensitive-row-value");
   });
 });
+
+function parseUserContext(request: {
+  messages: Array<{ role: "system" | "user"; content: string }>;
+}) {
+  const userMessage = request.messages.find((message) => message.role === "user");
+  expect(userMessage).toBeDefined();
+
+  return JSON.parse(userMessage?.content ?? "{}") as {
+    queryNeed: string;
+    querySession: Record<string, unknown>;
+    defaultSchemaCatalog: Record<string, unknown>;
+  };
+}

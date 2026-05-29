@@ -34,6 +34,30 @@ describe("SQL execution safety validation", () => {
     },
   );
 
+  it("blocks schema changes hidden after a read-only statement", () => {
+    const validation = validateSqlForExecution(
+      "select * from orders limit 10; drop table orders",
+    );
+
+    expect(validation).toMatchObject({
+      safetyMode: "readOnly",
+      canExecute: false,
+      blockedReason: "Read-only Mode blocks DROP statements.",
+    });
+  });
+
+  it("does not block write keywords inside comments or literals", () => {
+    expect(
+      validateSqlForExecution(
+        "select 'drop table orders' as sample_note /* alter table orders */ limit 1",
+      ),
+    ).toMatchObject({
+      safetyMode: "readOnly",
+      canExecute: true,
+      warnings: [],
+    });
+  });
+
   it("warns about missing LIMIT without changing or blocking SQL", () => {
     const sql = "select * from orders";
 

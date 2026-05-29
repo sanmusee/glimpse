@@ -94,6 +94,24 @@ describe("Glimpse app shell", () => {
     expect(screen.getByText(/create database connection/i)).toBeInTheDocument();
   });
 
+  it("does not expose V0.1 out-of-scope entry points", () => {
+    render(<App localPersistence={createInMemoryLocalPersistence()} />);
+
+    const workbench = screen.getByRole("main", { name: /glimpse workbench/i });
+    [
+      /ssh tunnel/i,
+      /csv export/i,
+      /sql explanation/i,
+      /sql autocomplete/i,
+      /team sharing/i,
+      /prompt template management/i,
+    ].forEach((entryPoint) => {
+      expect(workbench).not.toHaveTextContent(entryPoint);
+    });
+    expect(screen.queryByRole("button", { name: /csv/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /export/i })).not.toBeInTheDocument();
+  });
+
   it.each(["light", "dark", "system"] as const)(
     "persists and restores the %s theme preference",
     async (themePreference) => {
@@ -1297,7 +1315,14 @@ describe("Glimpse app shell", () => {
     );
   });
 
-  it("blocks write SQL before execution in Read-only Mode", async () => {
+  it.each([
+    ["write", "delete from orders", /read-only mode blocks delete statements/i],
+    [
+      "schema-changing",
+      "alter table orders add column private_note text",
+      /read-only mode blocks alter statements/i,
+    ],
+  ])("blocks %s SQL before execution in Read-only Mode", async (_kind, sql, blockedReason) => {
     const executionAttempts: string[] = [];
     const localPersistence = createInMemoryLocalPersistence({
       databaseConnections: [
@@ -1327,11 +1352,11 @@ describe("Glimpse app shell", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
     fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
-      target: { value: "delete from orders" },
+      target: { value: sql },
     });
     fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
 
-    expect(await screen.findByText(/read-only mode blocks delete statements/i)).toBeInTheDocument();
+    expect(await screen.findByText(blockedReason)).toBeInTheDocument();
     expect(executionAttempts).toEqual([]);
     await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
       executionResultMetadata: [],

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createInMemoryLocalPersistence, createTauriLocalPersistence } from "./localPersistence";
+import {
+  AI_PROVIDER_API_KEY_SECRET_ID,
+  createInMemoryLocalPersistence,
+  createTauriLocalPersistence,
+} from "./localPersistence";
 
 describe("local persistence boundary", () => {
   it("routes theme preference through desktop SQLite commands", async () => {
@@ -80,6 +84,55 @@ describe("local persistence boundary", () => {
             temperature: 0.2,
             maxTokens: 1200,
           },
+        },
+      },
+    ]);
+  });
+
+  it("keeps database passwords and AI API keys out of SQLite command payloads", async () => {
+    const calls: Array<{ command: string; args?: unknown }> = [];
+    const localPersistence = createTauriLocalPersistence(async (command, args) => {
+      calls.push({ command, args });
+      return null;
+    });
+
+    await localPersistence.aiConfiguration.saveGlobalAiConfiguration({
+      baseUrl: "https://api.example.test/v1",
+      model: "gpt-4.1-mini",
+      temperature: 0.2,
+      maxTokens: 1200,
+    });
+    await localPersistence.secrets.setSecret(
+      AI_PROVIDER_API_KEY_SECRET_ID,
+      "sk-plaintext-api-key",
+    );
+    await localPersistence.databaseConnections.saveDatabaseConnection({
+      id: "db-1",
+      name: "Warehouse",
+      host: "warehouse.internal",
+      port: 3306,
+      username: "readonly",
+      password: "plaintext-database-password",
+      defaultDatabase: "warehouse",
+    });
+
+    const sqliteCalls = calls.filter(({ command }) => command !== "set_secret");
+
+    expect(JSON.stringify(sqliteCalls)).not.toContain("sk-plaintext-api-key");
+    expect(JSON.stringify(sqliteCalls)).not.toContain("plaintext-database-password");
+    expect(calls.filter(({ command }) => command === "set_secret")).toEqual([
+      {
+        command: "set_secret",
+        args: {
+          secretId: AI_PROVIDER_API_KEY_SECRET_ID,
+          secretValue: "sk-plaintext-api-key",
+        },
+      },
+      {
+        command: "set_secret",
+        args: {
+          secretId: "database-connection:db-1:password",
+          secretValue: "plaintext-database-password",
         },
       },
     ]);
