@@ -1,7 +1,46 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { createInMemoryLocalPersistence } from "./platform/localPersistence";
+import {
+  createInMemoryLocalPersistence,
+  type DatabaseCatalogSnapshot,
+} from "./platform/localPersistence";
+
+const warehouseCatalog: DatabaseCatalogSnapshot = {
+  connectionId: "db-1",
+  database: "warehouse",
+  refreshedAt: "2026-05-29T10:00:00Z",
+  tables: [
+    {
+      name: "orders",
+      comment: "Customer orders",
+      columns: [
+        {
+          name: "id",
+          dataType: "bigint",
+          nullable: false,
+          defaultValue: null,
+          comment: "Primary identifier",
+          isPrimaryKey: true,
+        },
+        {
+          name: "customer_id",
+          dataType: "bigint",
+          nullable: false,
+          defaultValue: null,
+          comment: "Owning customer",
+          isPrimaryKey: false,
+        },
+      ],
+      indexes: [
+        { name: "PRIMARY", kind: "primary", columns: ["id"] },
+        { name: "idx_orders_customer", kind: "index", columns: ["customer_id"] },
+      ],
+      createTableDdl:
+        "CREATE TABLE `orders` (`id` bigint NOT NULL, `customer_id` bigint NOT NULL)",
+    },
+  ],
+};
 
 describe("Glimpse app shell", () => {
   afterEach(() => {
@@ -187,6 +226,135 @@ describe("Glimpse app shell", () => {
     expect(screen.queryByText(/ssh tunnel/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/advanced ssl/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/bastion/i)).not.toBeInTheDocument();
+  });
+
+  it("opens a saved connection and displays catalog from only its default schema", async () => {
+    const readScopes: Array<{ connectionId: string; defaultDatabase: string }> = [];
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: (connection) => {
+        readScopes.push({
+          connectionId: connection.id,
+          defaultDatabase: connection.defaultDatabase,
+        });
+
+        return warehouseCatalog;
+      },
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    expect(await screen.findByText("Warehouse")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /open catalog warehouse/i }));
+
+    expect(await screen.findByRole("region", { name: /database catalog/i })).toHaveTextContent(
+      "warehouse",
+    );
+    expect(screen.getByText("orders")).toBeInTheDocument();
+    expect(screen.getByText("Customer orders")).toBeInTheDocument();
+    expect(screen.getByText("id bigint not null primary key")).toBeInTheDocument();
+    expect(screen.getByText("idx_orders_customer index customer_id")).toBeInTheDocument();
+    expect(screen.getByText(/create table `orders`/i)).toBeInTheDocument();
+    expect(readScopes).toEqual([{ connectionId: "db-1", defaultDatabase: "warehouse" }]);
+    expect(JSON.stringify(readScopes)).not.toContain("mysql");
+    expect(JSON.stringify(readScopes)).not.toContain("information_schema");
+  });
+
+  it("manually refreshes the catalog and updates the displayed cache", async () => {
+    const refreshedCatalog: DatabaseCatalogSnapshot = {
+      ...warehouseCatalog,
+      refreshedAt: "2026-05-29T10:05:00Z",
+      tables: [
+        ...warehouseCatalog.tables,
+        {
+          name: "customers",
+          comment: "Customer profile",
+          columns: [
+            {
+              name: "id",
+              dataType: "bigint",
+              nullable: false,
+              defaultValue: null,
+              comment: "",
+              isPrimaryKey: true,
+            },
+          ],
+          indexes: [{ name: "PRIMARY", kind: "primary", columns: ["id"] }],
+          createTableDdl: "CREATE TABLE `customers` (`id` bigint NOT NULL)",
+        },
+      ],
+    };
+    const catalogReads = [warehouseCatalog, refreshedCatalog];
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => catalogReads.shift() ?? refreshedCatalog,
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    expect(await screen.findByText("orders")).toBeInTheDocument();
+    expect(screen.queryByText("customers")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /refresh catalog/i }));
+
+    expect(await screen.findByText("customers")).toBeInTheDocument();
+    expect(screen.getByText(/2 tables loaded/i)).toBeInTheDocument();
+    await expect(
+      localPersistence.databaseCatalogs.getCatalogForSqlGeneration("db-1"),
+    ).resolves.toEqual(refreshedCatalog);
+  });
+
+  it("shows metadata permission failure without invalidating the saved connection", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => {
+        throw new Error("permission denied for information_schema");
+      },
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    expect(await screen.findByText("Warehouse")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /open catalog warehouse/i }));
+
+    expect(await screen.findByText(/metadata permission failure/i)).toHaveTextContent(
+      "permission denied",
+    );
+    expect(screen.getByText("Warehouse")).toBeInTheDocument();
+    await expect(localPersistence.databaseConnections.listDatabaseConnections()).resolves.toEqual([
+      expect.objectContaining({ id: "db-1", name: "Warehouse" }),
+    ]);
   });
 
   it("saves and restores the global AI provider configuration", async () => {

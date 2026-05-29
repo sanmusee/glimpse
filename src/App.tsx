@@ -9,6 +9,7 @@ import {
   defaultLocalPersistence,
   type DatabaseConnection,
   type DatabaseConnectionInput,
+  type DatabaseCatalogSnapshot,
   type GlobalAiConfiguration,
   type LocalPersistence,
   type QuerySession,
@@ -59,6 +60,8 @@ export function App({
   const [databaseConnectionForm, setDatabaseConnectionForm] =
     useState<DatabaseConnectionInput>(emptyDatabaseConnectionForm);
   const [connectionTestMessage, setConnectionTestMessage] = useState<string | null>(null);
+  const [activeCatalog, setActiveCatalog] = useState<DatabaseCatalogSnapshot | null>(null);
+  const [catalogStatus, setCatalogStatus] = useState<string | null>(null);
   const [aiConfigurationForm, setAiConfigurationForm] = useState<AiConfigurationFormState>(
     emptyAiConfigurationForm,
   );
@@ -200,6 +203,40 @@ export function App({
     setDatabaseConnections((currentConnections) =>
       currentConnections.filter((currentConnection) => currentConnection.id !== connection.id),
     );
+
+    if (activeCatalog?.connectionId === connection.id) {
+      setActiveCatalog(null);
+    }
+  };
+
+  const openCatalog = async (connection: DatabaseConnection) => {
+    setCatalogStatus(`Reading catalog for ${connection.defaultDatabase}`);
+
+    try {
+      const catalog = await localPersistence.databaseCatalogs.openConnectionCatalog(connection.id);
+      setActiveCatalog(catalog);
+      setCatalogStatus(`Catalog loaded from ${catalog.database}`);
+    } catch (error) {
+      setCatalogStatus(formatCatalogError(error));
+    }
+  };
+
+  const refreshCatalog = async () => {
+    if (!activeCatalog) {
+      return;
+    }
+
+    setCatalogStatus(`Refreshing catalog for ${activeCatalog.database}`);
+
+    try {
+      const catalog = await localPersistence.databaseCatalogs.refreshCatalog(
+        activeCatalog.connectionId,
+      );
+      setActiveCatalog(catalog);
+      setCatalogStatus(`Catalog refreshed from ${catalog.database}`);
+    } catch (error) {
+      setCatalogStatus(formatCatalogError(error));
+    }
   };
 
   const createQuerySession = async (connection: DatabaseConnection) => {
@@ -403,6 +440,9 @@ export function App({
                       <button type="button" onClick={() => editDatabaseConnection(connection)}>
                         Edit {connection.name}
                       </button>
+                      <button type="button" onClick={() => openCatalog(connection)}>
+                        Open catalog {connection.name}
+                      </button>
                       <button type="button" onClick={() => deleteDatabaseConnection(connection)}>
                         Delete {connection.name}
                       </button>
@@ -542,10 +582,80 @@ export function App({
         </section>
 
         <section className="panel">
+          <section aria-label="Database catalog" className="catalog-panel">
+            <div className="panel-title">Database Catalog</div>
+            <div className="catalog-toolbar">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={refreshCatalog}
+                disabled={!activeCatalog}
+              >
+                Refresh catalog
+              </button>
+              {catalogStatus ? <div className="status-line">{catalogStatus}</div> : null}
+            </div>
+            {activeCatalog ? (
+              <div className="catalog-content">
+                <div className="catalog-summary">
+                  <strong>{activeCatalog.database}</strong>
+                  <span>
+                    {activeCatalog.tables.length} table
+                    {activeCatalog.tables.length === 1 ? "" : "s"} loaded
+                  </span>
+                </div>
+                {activeCatalog.tables.map((table) => (
+                  <article className="catalog-table" key={table.name}>
+                    <header>
+                      <strong>{table.name}</strong>
+                      {table.comment ? <span>{table.comment}</span> : null}
+                    </header>
+                    <div className="catalog-subtitle">Fields</div>
+                    <ul>
+                      {table.columns.map((column) => (
+                        <li key={column.name}>
+                          <span>
+                            {column.name} {column.dataType}{" "}
+                            {column.nullable ? "nullable" : "not null"}
+                            {column.isPrimaryKey ? " primary key" : ""}
+                            {column.defaultValue ? ` default ${column.defaultValue}` : ""}
+                          </span>
+                          {column.comment ? <small>{column.comment}</small> : null}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="catalog-subtitle">Indexes</div>
+                    <ul>
+                      {table.indexes.map((index) => (
+                        <li key={index.name}>
+                          {index.name} {index.kind} {index.columns.join(", ")}
+                        </li>
+                      ))}
+                    </ul>
+                    {table.createTableDdl ? (
+                      <pre className="ddl-block">{table.createTableDdl}</pre>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="placeholder-row">Open a connection to inspect its default schema.</div>
+            )}
+          </section>
+        </section>
+
+        <section className="panel">
           <div className="panel-title">Candidate Table Set</div>
           <div className="placeholder-row">No candidate tables yet</div>
         </section>
       </aside>
     </main>
   );
+}
+
+function formatCatalogError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("permission")
+    ? `Metadata Permission Failure: ${message}`
+    : `Catalog read failed: ${message}`;
 }

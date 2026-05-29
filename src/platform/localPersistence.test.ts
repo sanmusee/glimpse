@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTauriLocalPersistence } from "./localPersistence";
+import { createInMemoryLocalPersistence, createTauriLocalPersistence } from "./localPersistence";
 
 describe("local persistence boundary", () => {
   it("routes theme preference through desktop SQLite commands", async () => {
@@ -175,6 +175,90 @@ describe("local persistence boundary", () => {
       },
       { command: "delete_database_connection", args: { id: "db-2" } },
     ]);
+  });
+
+  it("routes catalog open and manual refresh through metadata commands while SQL generation uses only cached catalog", async () => {
+    const calls: Array<{ command: string; args?: unknown }> = [];
+    const catalog = {
+      connectionId: "db-1",
+      database: "warehouse",
+      refreshedAt: "2026-05-29T10:00:00Z",
+      tables: [
+        {
+          name: "orders",
+          comment: "",
+          columns: [],
+          indexes: [],
+          createTableDdl: "CREATE TABLE `orders` (`id` bigint)",
+        },
+      ],
+    };
+    const localPersistence = createTauriLocalPersistence(async (command, args) => {
+      calls.push({ command, args });
+
+      if (
+        command === "open_connection_catalog" ||
+        command === "refresh_connection_catalog" ||
+        command === "get_cached_catalog"
+      ) {
+        return catalog;
+      }
+
+      return null;
+    });
+
+    await expect(localPersistence.databaseCatalogs.openConnectionCatalog("db-1")).resolves.toEqual(
+      catalog,
+    );
+    await expect(localPersistence.databaseCatalogs.refreshCatalog("db-1")).resolves.toEqual(
+      catalog,
+    );
+    await expect(
+      localPersistence.databaseCatalogs.getCatalogForSqlGeneration("db-1"),
+    ).resolves.toEqual(catalog);
+
+    expect(calls).toEqual([
+      { command: "open_connection_catalog", args: { connectionId: "db-1" } },
+      { command: "refresh_connection_catalog", args: { connectionId: "db-1" } },
+      { command: "get_cached_catalog", args: { connectionId: "db-1" } },
+    ]);
+  });
+
+  it("uses cached catalog for SQL generation context without implicit metadata refresh", async () => {
+    let metadataReads = 0;
+    const catalog = {
+      connectionId: "db-1",
+      database: "warehouse",
+      refreshedAt: "2026-05-29T10:00:00Z",
+      tables: [],
+    };
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => {
+        metadataReads += 1;
+        return catalog;
+      },
+    });
+
+    await localPersistence.databaseCatalogs.openConnectionCatalog("db-1");
+    await expect(
+      localPersistence.databaseCatalogs.getCatalogForSqlGeneration("db-1"),
+    ).resolves.toEqual(catalog);
+    await expect(
+      localPersistence.databaseCatalogs.getCatalogForSqlGeneration("db-1"),
+    ).resolves.toEqual(catalog);
+
+    expect(metadataReads).toBe(1);
   });
 
   it("routes query sessions through SQLite commands and strips result rows from execution metadata", async () => {
