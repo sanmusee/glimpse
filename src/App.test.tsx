@@ -165,6 +165,122 @@ describe("Glimpse app shell", () => {
     expect(connectionTree).not.toHaveTextContent("customers");
   });
 
+  it("expands a saved connection into its default schema and table names", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => warehouseCatalogWithCustomers,
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    const connectionTree = screen.getByRole("tree", { name: /database connection tree/i });
+    fireEvent.click(await screen.findByRole("button", { name: /expand warehouse/i }));
+
+    expect(await screen.findByRole("treeitem", { name: /default schema warehouse/i }))
+      .toBeInTheDocument();
+    expect(connectionTree).toHaveTextContent("orders");
+    expect(connectionTree).toHaveTextContent("customers");
+  });
+
+  it("shows an empty catalog state in the connection tree when the default schema has no tables", async () => {
+    const emptyCatalog: DatabaseCatalogSnapshot = {
+      ...warehouseCatalog,
+      tables: [],
+    };
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => emptyCatalog,
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    const connectionTree = screen.getByRole("tree", { name: /database connection tree/i });
+    fireEvent.click(await screen.findByRole("button", { name: /expand warehouse/i }));
+
+    expect(await screen.findByRole("treeitem", { name: /default schema warehouse/i }))
+      .toBeInTheDocument();
+    expect(connectionTree).toHaveTextContent("No tables available in warehouse");
+  });
+
+  it("shows catalog loading state while expanding a connection tree item", async () => {
+    let resolveCatalog: (catalog: DatabaseCatalogSnapshot) => void = () => {};
+    const catalogPromise = new Promise<DatabaseCatalogSnapshot>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => catalogPromise,
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    const connectionTree = screen.getByRole("tree", { name: /database connection tree/i });
+    fireEvent.click(await screen.findByRole("button", { name: /expand warehouse/i }));
+
+    expect(connectionTree).toHaveTextContent("Reading catalog for warehouse");
+
+    resolveCatalog(warehouseCatalog);
+    expect(await screen.findByRole("treeitem", { name: /default schema warehouse/i }))
+      .toBeInTheDocument();
+  });
+
+  it("keeps the connection tree at table level without field or index browsing", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => warehouseCatalog,
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    const connectionTree = screen.getByRole("tree", { name: /database connection tree/i });
+    fireEvent.click(await screen.findByRole("button", { name: /expand warehouse/i }));
+
+    expect(await screen.findByRole("treeitem", { name: /table orders/i })).toBeInTheDocument();
+    expect(connectionTree).not.toHaveTextContent("customer_id");
+    expect(connectionTree).not.toHaveTextContent("idx_orders_customer");
+    expect(connectionTree).not.toHaveTextContent(/create table `orders`/i);
+  });
+
   it("opens Data Source Management with saved data sources on the left and a create/edit form on the right", async () => {
     render(
       <App
@@ -556,14 +672,14 @@ describe("Glimpse app shell", () => {
     expect(await screen.findByText("Warehouse")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /open catalog warehouse/i }));
 
-    expect(await screen.findByRole("region", { name: /database catalog/i })).toHaveTextContent(
-      "warehouse",
-    );
-    expect(screen.getByText("orders")).toBeInTheDocument();
-    expect(screen.getByText("Customer orders")).toBeInTheDocument();
-    expect(screen.getByText("id bigint not null primary key")).toBeInTheDocument();
-    expect(screen.getByText("idx_orders_customer index customer_id")).toBeInTheDocument();
-    expect(screen.getByText(/create table `orders`/i)).toBeInTheDocument();
+    const catalogRegion = await screen.findByRole("region", { name: /database catalog/i });
+    expect(catalogRegion).toHaveTextContent("warehouse");
+    expect(within(catalogRegion).getByText("orders")).toBeInTheDocument();
+    expect(within(catalogRegion).getByText("Customer orders")).toBeInTheDocument();
+    expect(within(catalogRegion).getByText("id bigint not null primary key")).toBeInTheDocument();
+    expect(within(catalogRegion).getByText("idx_orders_customer index customer_id"))
+      .toBeInTheDocument();
+    expect(within(catalogRegion).getByText(/create table `orders`/i)).toBeInTheDocument();
     expect(readScopes).toEqual([{ connectionId: "db-1", defaultDatabase: "warehouse" }]);
     expect(JSON.stringify(readScopes)).not.toContain("mysql");
     expect(JSON.stringify(readScopes)).not.toContain("information_schema");
@@ -612,13 +728,14 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
-    expect(await screen.findByText("orders")).toBeInTheDocument();
+    const catalogRegion = screen.getByRole("region", { name: /database catalog/i });
+    expect(await within(catalogRegion).findByText("orders")).toBeInTheDocument();
     expect(screen.queryByText("customers")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /refresh catalog/i }));
 
-    expect(await screen.findByText("customers")).toBeInTheDocument();
-    expect(screen.getByText(/2 tables loaded/i)).toBeInTheDocument();
+    expect(await within(catalogRegion).findByText("customers")).toBeInTheDocument();
+    expect(within(catalogRegion).getByText(/2 tables loaded/i)).toBeInTheDocument();
     await expect(
       localPersistence.databaseCatalogs.getCatalogForSqlGeneration("db-1"),
     ).resolves.toEqual(refreshedCatalog);
@@ -647,7 +764,9 @@ describe("Glimpse app shell", () => {
     expect(await screen.findByText("Warehouse")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /open catalog warehouse/i }));
 
-    expect(await screen.findByText(/metadata permission failure/i)).toHaveTextContent(
+    const connectionTree = screen.getByRole("tree", { name: /database connection tree/i });
+    await waitFor(() => expect(connectionTree).toHaveTextContent(/metadata permission failure/i));
+    expect(connectionTree).toHaveTextContent(
       "permission denied",
     );
     expect(screen.getByText("Warehouse")).toBeInTheDocument();
@@ -963,7 +1082,11 @@ describe("Glimpse app shell", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
-    expect(await screen.findByText("customers")).toBeInTheDocument();
+    expect(
+      await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
+        "customers",
+      ),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
     fireEvent.change(await screen.findByRole("textbox", { name: /query need/i }), {
       target: { value: "Find monthly order totals" },
@@ -1050,7 +1173,11 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} sqlGenerator={sqlGenerator} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
-    expect(await screen.findByText("customers")).toBeInTheDocument();
+    expect(
+      await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
+        "customers",
+      ),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
     fireEvent.change(await screen.findByRole("textbox", { name: /query need/i }), {
       target: { value: "Count orders by customer" },
@@ -1146,7 +1273,11 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} sqlGenerator={sqlGenerator} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
-    expect(await screen.findByText("customers")).toBeInTheDocument();
+    expect(
+      await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
+        "customers",
+      ),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
     fireEvent.change(await screen.findByRole("textbox", { name: /query need/i }), {
       target: { value: "Count orders" },
@@ -1199,7 +1330,11 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} sqlModifier={sqlModifier} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
-    expect(await screen.findByText("customers")).toBeInTheDocument();
+    expect(
+      await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
+        "customers",
+      ),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
     const sqlEditor = await screen.findByRole("textbox", { name: /sql draft/i });
     fireEvent.change(sqlEditor, { target: { value: "select id from orders" } });
@@ -1579,7 +1714,11 @@ describe("Glimpse app shell", () => {
     render(<App localPersistence={localPersistence} sqlRepairer={sqlRepairer} />);
 
     fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
-    expect(await screen.findByText("customers")).toBeInTheDocument();
+    expect(
+      await within(screen.getByRole("region", { name: /database catalog/i })).findByText(
+        "customers",
+      ),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
     const sqlEditor = await screen.findByRole("textbox", { name: /sql draft/i });
     fireEvent.change(sqlEditor, {
