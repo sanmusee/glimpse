@@ -21,11 +21,13 @@ import {
   type DatabaseConnection,
   type DatabaseConnectionInput,
   type DatabaseCatalogSnapshot,
+  type ExecutionResultMetadata,
   type GlobalAiConfiguration,
   type LocalPersistence,
   type QuerySession,
   type ThemePreference,
 } from "./platform/localPersistence";
+import { validateSqlForExecution } from "./sqlExecution";
 
 interface AppProps {
   localPersistence?: LocalPersistence;
@@ -90,6 +92,8 @@ export function App({
   const [modificationIntent, setModificationIntent] = useState("");
   const [candidateTableStatus, setCandidateTableStatus] = useState("");
   const [sqlGenerationStatus, setSqlGenerationStatus] = useState("");
+  const [executionStatus, setExecutionStatus] = useState("");
+  const [executionWarnings, setExecutionWarnings] = useState<string[]>([]);
   const [hasGeneratedSql, setHasGeneratedSql] = useState(false);
   const [selectedCandidateTableName, setSelectedCandidateTableName] = useState("");
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
@@ -548,6 +552,82 @@ export function App({
     }
   };
 
+  const runSqlExecution = async () => {
+    if (!currentQuerySession) {
+      setExecutionStatus("Create a Query Session before running SQL");
+      return;
+    }
+
+    const validation = validateSqlForExecution(currentQuerySession.sqlDraft, "readOnly");
+    setExecutionWarnings(validation.warnings);
+
+    if (!validation.normalizedSql) {
+      setExecutionStatus("SQL draft is required");
+      return;
+    }
+
+    if (!validation.canExecute) {
+      setExecutionStatus(validation.blockedReason ?? "SQL is blocked in Read-only Mode");
+      return;
+    }
+
+    const executionSession = currentQuerySession;
+    setExecutionStatus("Running SQL in Read-only Mode");
+
+    try {
+      const result = await localPersistence.sqlExecution.executeSql({
+        connectionId: executionSession.databaseConnectionId,
+        sql: validation.normalizedSql,
+        safetyMode: validation.safetyMode,
+      });
+      const metadata: ExecutionResultMetadata =
+        result.ok
+          ? {
+              id: createUiLocalId(),
+              sql: validation.normalizedSql,
+              rowCount: result.rowCount,
+              columns: result.columns,
+              executedAt: new Date().toISOString(),
+            }
+          : {
+              id: createUiLocalId(),
+              sql: validation.normalizedSql,
+              rowCount: 0,
+              columns: [],
+              executedAt: new Date().toISOString(),
+              errorMessage: result.errorMessage,
+            };
+      const savedSession = await localPersistence.querySessions.saveExecutionResultMetadata(
+        executionSession.id,
+        [...executionSession.executionResultMetadata, metadata],
+      );
+
+      updateCurrentQuerySession(savedSession);
+      setExecutionStatus(
+        result.ok
+          ? `Execution succeeded: ${result.rowCount} rows, ${result.columns.length} columns`
+          : `Execution failed: ${result.errorMessage}`,
+      );
+    } catch (error) {
+      const message = formatSqlExecutionError(error);
+      const metadata: ExecutionResultMetadata = {
+        id: createUiLocalId(),
+        sql: validation.normalizedSql,
+        rowCount: 0,
+        columns: [],
+        executedAt: new Date().toISOString(),
+        errorMessage: message,
+      };
+      const savedSession = await localPersistence.querySessions.saveExecutionResultMetadata(
+        executionSession.id,
+        [...executionSession.executionResultMetadata, metadata],
+      );
+
+      updateCurrentQuerySession(savedSession);
+      setExecutionStatus(`Execution failed: ${message}`);
+    }
+  };
+
   const addCandidateTable = async () => {
     if (!selectedCandidateTableName || !currentQuerySession) {
       return;
@@ -787,14 +867,52 @@ export function App({
 -- Review it before running in Read-only Mode.`}
             value={currentQuerySession?.sqlDraft ?? ""}
           />
+          <div className="editor-actions">
+            <button
+              className="primary-action"
+              type="button"
+              onClick={runSqlExecution}
+              disabled={!currentQuerySession}
+            >
+              Run SQL in Read-only Mode
+            </button>
+          </div>
         </section>
 
         <section aria-label="Query results" className="panel results-panel">
           <div className="panel-title">Result</div>
-          <div className="empty-state">
-            <strong>No query has run</strong>
-            <p>Results will appear here after manual read-only execution.</p>
-          </div>
+          {executionWarnings.length ? (
+            <div className="execution-warning" role="status">
+              {executionWarnings.join(" ")}
+            </div>
+          ) : null}
+          {executionStatus ? (
+            <div className="execution-status" role="status">
+              {executionStatus}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <strong>No query has run</strong>
+              <p>Results will appear here after manual read-only execution.</p>
+            </div>
+          )}
+          {currentQuerySession?.executionResultMetadata.length ? (
+            <div className="execution-metadata-list" aria-label="Execution result metadata">
+              {currentQuerySession.executionResultMetadata.map((metadata) => (
+                <article className="execution-metadata-row" key={metadata.id}>
+                  <strong>
+                    {metadata.errorMessage
+                      ? `Failed: ${metadata.errorMessage}`
+                      : `Succeeded: ${metadata.rowCount} rows`}
+                  </strong>
+                  <span>
+                    {metadata.columns.length} column
+                    {metadata.columns.length === 1 ? "" : "s"} at {metadata.executedAt}
+                  </span>
+                </article>
+              ))}
+            </div>
+          ) : null}
         </section>
       </section>
 
@@ -850,7 +968,7 @@ export function App({
             <div className="status-line">{sqlGenerationStatus}</div>
           ) : null}
           {hasGeneratedSql ? (
-            <button className="secondary-button" type="button">
+            <button className="secondary-button" type="button" onClick={runSqlExecution}>
               Run generated SQL manually
             </button>
           ) : null}
@@ -1065,6 +1183,10 @@ function formatCandidateTableError(error: unknown) {
 function formatSqlGenerationError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return `SQL generation failed: ${message}`;
+}
+
+function formatSqlExecutionError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function createUiLocalId() {

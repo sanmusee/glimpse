@@ -126,6 +126,26 @@ struct ExecutionResultMetadata {
     error_message: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SqlExecutionInput {
+    connection_id: String,
+    sql: String,
+    safety_mode: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SqlExecutionResult {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    row_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    columns: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QuerySessionRecord {
@@ -516,6 +536,141 @@ fn read_remote_database_catalog(
         refreshed_at: current_catalog_timestamp(local_store)?,
         tables,
     })
+}
+
+fn sql_execution_success(row_count: i64, columns: Vec<String>) -> SqlExecutionResult {
+    SqlExecutionResult {
+        ok: true,
+        row_count: Some(row_count),
+        columns: Some(columns),
+        error_message: None,
+    }
+}
+
+fn sql_execution_failure(message: impl Into<String>) -> SqlExecutionResult {
+    SqlExecutionResult {
+        ok: false,
+        row_count: None,
+        columns: None,
+        error_message: Some(message.into()),
+    }
+}
+
+fn validate_read_only_sql(sql: &str) -> Result<(), String> {
+    let normalized_sql = sql.trim();
+
+    if normalized_sql.is_empty() {
+        return Err("SQL draft is required".to_string());
+    }
+
+    let sanitized_sql = strip_sql_comments_and_literals(normalized_sql).to_lowercase();
+    let statements = sanitized_sql
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty());
+
+    let mut saw_statement = false;
+    for statement in statements {
+        saw_statement = true;
+        let tokens = sql_keyword_tokens(statement);
+
+        if let Some(blocked_keyword) = tokens.iter().find(|token| {
+            matches!(
+                token.as_str(),
+                "insert" | "update" | "delete" | "drop" | "alter" | "truncate" | "create"
+            )
+        }) {
+            return Err(format!(
+                "Read-only Mode blocks {} statements.",
+                blocked_keyword.to_uppercase()
+            ));
+        }
+
+        let first_keyword = tokens.first().map(String::as_str).unwrap_or_default();
+        if !matches!(first_keyword, "select" | "with" | "explain") {
+            return Err(
+                "Read-only Mode only allows SELECT, WITH, and EXPLAIN statements.".to_string(),
+            );
+        }
+    }
+
+    if saw_statement {
+        Ok(())
+    } else {
+        Err("SQL draft is required".to_string())
+    }
+}
+
+fn sql_keyword_tokens(sql: &str) -> Vec<String> {
+    sql.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn strip_sql_comments_and_literals(sql: &str) -> String {
+    let mut sanitized = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut quote: Option<char> = None;
+
+    while let Some(current) = chars.next() {
+        if let Some(active_quote) = quote {
+            sanitized.push(' ');
+
+            if current == '\\' && active_quote != '`' {
+                if chars.next().is_some() {
+                    sanitized.push(' ');
+                }
+                continue;
+            }
+
+            if current == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        if current == '-' && chars.peek() == Some(&'-') {
+            sanitized.push(' ');
+            sanitized.push(' ');
+            chars.next();
+
+            while let Some(comment_char) = chars.next() {
+                if comment_char == '\n' {
+                    sanitized.push('\n');
+                    break;
+                }
+                sanitized.push(' ');
+            }
+            continue;
+        }
+
+        if current == '/' && chars.peek() == Some(&'*') {
+            sanitized.push(' ');
+            sanitized.push(' ');
+            chars.next();
+
+            let mut previous = '\0';
+            while let Some(comment_char) = chars.next() {
+                sanitized.push(' ');
+                if previous == '*' && comment_char == '/' {
+                    break;
+                }
+                previous = comment_char;
+            }
+            continue;
+        }
+
+        if matches!(current, '\'' | '"' | '`') {
+            quote = Some(current);
+            sanitized.push(' ');
+            continue;
+        }
+
+        sanitized.push(current);
+    }
+
+    sanitized
 }
 
 fn parse_json_array<T: DeserializeOwned>(value: String) -> Result<Vec<T>, String> {
@@ -931,6 +1086,84 @@ fn test_database_connection(
     }
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn execute_sql(
+    app: tauri::AppHandle,
+    input: SqlExecutionInput,
+) -> Result<SqlExecutionResult, String> {
+    if input.safety_mode != "readOnly" {
+        return Ok(sql_execution_failure(
+            "Only Read-only Mode is available in V0.1.",
+        ));
+    }
+
+    let sql = input.sql.trim().to_string();
+    if let Err(reason) = validate_read_only_sql(&sql) {
+        return Ok(sql_execution_failure(reason));
+    }
+
+    let local_store = open_local_store(&app)?;
+    let connection = read_database_connection_record(&local_store, &input.connection_id)?;
+    let password = match get_secret(connection.password_secret_id.clone())? {
+        Some(password) => password,
+        None => {
+            return Ok(sql_execution_failure(
+                "Saved password was not found in Keychain.",
+            ))
+        }
+    };
+    let builder = mysql::OptsBuilder::new()
+        .ip_or_hostname(Some(connection.host))
+        .tcp_port(connection.port)
+        .user(Some(connection.username))
+        .pass(Some(password))
+        .db_name(Some(connection.default_database));
+    let pool = match mysql::Pool::new(builder) {
+        Ok(pool) => pool,
+        Err(error) => {
+            return Ok(sql_execution_failure(format!(
+                "Database connection failed: {error}"
+            )))
+        }
+    };
+    let mut database_connection = match pool.get_conn() {
+        Ok(database_connection) => database_connection,
+        Err(error) => {
+            return Ok(sql_execution_failure(format!(
+                "Database connection failed: {error}"
+            )))
+        }
+    };
+    let mut result = match database_connection.query_iter(sql) {
+        Ok(result) => result,
+        Err(error) => {
+            return Ok(sql_execution_failure(format!(
+                "SQL execution failed: {error}"
+            )))
+        }
+    };
+    let columns = result
+        .columns()
+        .as_ref()
+        .iter()
+        .map(|column| column.name_str().into_owned())
+        .collect::<Vec<_>>();
+    let mut row_count = 0;
+
+    for row in result.by_ref() {
+        match row {
+            Ok(_) => row_count += 1,
+            Err(error) => {
+                return Ok(sql_execution_failure(format!(
+                    "SQL execution failed: {error}"
+                )))
+            }
+        }
+    }
+
+    Ok(sql_execution_success(row_count, columns))
+}
+
 #[tauri::command]
 fn list_query_sessions(app: tauri::AppHandle) -> Result<Vec<QuerySessionRecord>, String> {
     let connection = open_local_store(&app)?;
@@ -1201,6 +1434,7 @@ pub fn run() {
             get_cached_catalog,
             open_connection_catalog,
             refresh_connection_catalog,
+            execute_sql,
             list_query_sessions,
             create_query_session,
             get_restored_query_session,

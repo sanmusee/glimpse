@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type { ExecutionSafetyMode } from "../sqlExecution";
 
 export type ThemePreference = "system" | "light" | "dark";
 type TauriInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -130,6 +131,27 @@ export interface ExecutionResultMetadata {
   errorMessage?: string;
 }
 
+export interface SqlExecutionInput {
+  connectionId: string;
+  sql: string;
+  safetyMode: ExecutionSafetyMode;
+}
+
+export type SqlExecutionResult =
+  | {
+      ok: true;
+      rowCount: number;
+      columns: string[];
+    }
+  | {
+      ok: false;
+      errorMessage: string;
+    };
+
+export interface SqlExecutionStore {
+  executeSql(input: SqlExecutionInput): Promise<SqlExecutionResult>;
+}
+
 export interface QuerySessionStore {
   listQuerySessions(): Promise<QuerySession[]>;
   createQuerySession(input: { databaseConnectionId: string }): Promise<QuerySession>;
@@ -156,6 +178,7 @@ export interface LocalPersistence {
   databaseConnections: DatabaseConnectionStore;
   databaseCatalogs: DatabaseCatalogStore;
   querySessions: QuerySessionStore;
+  sqlExecution: SqlExecutionStore;
 }
 
 export function isThemePreference(value: unknown): value is ThemePreference {
@@ -172,6 +195,9 @@ export function createInMemoryLocalPersistence(initial?: {
   readDatabaseCatalog?: (
     connection: DatabaseConnection,
   ) => Promise<DatabaseCatalogSnapshot> | DatabaseCatalogSnapshot;
+  executeSql?: (
+    input: SqlExecutionInput,
+  ) => Promise<SqlExecutionResult> | SqlExecutionResult;
 }): LocalPersistence {
   let themePreference = initial?.themePreference ?? "system";
   let aiConfiguration = initial?.aiConfiguration ?? null;
@@ -395,6 +421,18 @@ export function createInMemoryLocalPersistence(initial?: {
         return updatedSession;
       },
     },
+    sqlExecution: {
+      async executeSql(input) {
+        if (initial?.executeSql) {
+          return initial.executeSql(input);
+        }
+
+        return {
+          ok: false,
+          errorMessage: "SQL execution is not available in browser preview",
+        };
+      },
+    },
   };
 }
 
@@ -524,6 +562,14 @@ export function createTauriLocalPersistence(invoke: TauriInvoke = tauriInvoke): 
         return session as QuerySession;
       },
     },
+    sqlExecution: {
+      async executeSql(input) {
+        const result = await invoke("execute_sql", { input });
+        return isSqlExecutionResult(result)
+          ? result
+          : { ok: false, errorMessage: "SQL execution returned an invalid response" };
+      },
+    },
   };
 }
 
@@ -567,6 +613,19 @@ function isDatabaseConnectionTestResult(
 
   const candidate = value as { ok?: unknown; message?: unknown };
   return typeof candidate.ok === "boolean" && typeof candidate.message === "string";
+}
+
+function isSqlExecutionResult(value: unknown): value is SqlExecutionResult {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (candidate.ok === true) {
+    return typeof candidate.rowCount === "number" && Array.isArray(candidate.columns);
+  }
+
+  return candidate.ok === false && typeof candidate.errorMessage === "string";
 }
 
 function assertDatabaseCatalogSnapshot(value: unknown): DatabaseCatalogSnapshot {
