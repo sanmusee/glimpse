@@ -1054,6 +1054,182 @@ describe("Glimpse app shell", () => {
     ).toBeInTheDocument();
   });
 
+
+  it("restores the active SQL Console's latest result set when switching back to it", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+      executeSql: (input) => ({
+        ok: true,
+        rowCount: 1,
+        columns: ["source_console"],
+        rows: [[input.sql.includes("orders") ? "orders-result" : "customers-result"]],
+      }),
+    });
+    const ordersConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(
+      ordersConsole.id,
+      "select source_console from orders limit 1",
+    );
+    const customersConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(
+      customersConsole.id,
+      "select source_console from customers limit 1",
+    );
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /run sql in read-only mode/i }));
+    expect(await screen.findByText("customers-result")).toBeInTheDocument();
+
+    const sqlConsoleList = await screen.findByRole("list", { name: /sql console list/i });
+    fireEvent.click(
+      within(sqlConsoleList).getByRole("button", {
+        name: /open sql console warehouse analytics select source_console from orders/i,
+      }),
+    );
+    expect(await screen.findByText(/no query has run/i)).toBeInTheDocument();
+
+    fireEvent.click(
+      within(sqlConsoleList).getByRole("button", {
+        name: /open sql console warehouse analytics select source_console from customers/i,
+      }),
+    );
+
+    expect(await screen.findByText("customers-result")).toBeInTheDocument();
+    expect(screen.queryByText("orders-result")).not.toBeInTheDocument();
+  });
+
+  it("keeps each SQL Console's latest success or error state separate while switching", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+      executeSql: (input) =>
+        input.sql.includes("broken_orders")
+          ? {
+              ok: false,
+              errorMessage: "Unknown table 'broken_orders'",
+            }
+          : {
+              ok: true,
+              rowCount: 1,
+              columns: ["console_name"],
+              rows: [["customers-console"]],
+            },
+    });
+    const ordersConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(
+      ordersConsole.id,
+      "select * from broken_orders limit 1",
+    );
+    const customersConsole = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(
+      customersConsole.id,
+      "select console_name from customers limit 1",
+    );
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /run sql in read-only mode/i }));
+    expect(await screen.findByText("customers-console")).toBeInTheDocument();
+
+    const sqlConsoleList = await screen.findByRole("list", { name: /sql console list/i });
+    fireEvent.click(
+      within(sqlConsoleList).getByRole("button", {
+        name: /open sql console warehouse analytics select \* from broken_orders/i,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: /sql draft/i })).toHaveValue(
+        "select * from broken_orders limit 1",
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByText(/execution failed: unknown table 'broken_orders'/i))
+      .toBeInTheDocument();
+    expect(screen.queryByText("customers-console")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      within(sqlConsoleList).getByRole("button", {
+        name: /open sql console warehouse analytics select console_name from customers/i,
+      }),
+    );
+
+    expect(await screen.findByText("customers-console")).toBeInTheDocument();
+    expect(screen.queryByText(/execution failed: unknown table 'broken_orders'/i))
+      .not.toBeInTheDocument();
+  });
+
+  it("shows only the active SQL Console's latest result set without persistent result tabs", async () => {
+    let executionCount = 0;
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+      executeSql: () => {
+        executionCount += 1;
+
+        return {
+          ok: true,
+          rowCount: 1,
+          columns: ["run_label"],
+          rows: [[executionCount === 1 ? "first-run-result" : "second-run-result"]],
+        };
+      },
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
+      target: { value: "select run_label from orders limit 1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+    expect(await screen.findByText("first-run-result")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    const resultRegion = screen.getByRole("region", { name: /active console result set/i });
+    expect(await within(resultRegion).findByText("second-run-result")).toBeInTheDocument();
+    expect(within(resultRegion).queryByText("first-run-result")).not.toBeInTheDocument();
+    expect(within(resultRegion).queryByRole("tab")).not.toBeInTheDocument();
+  });
+
   it("restores the most recent query session and SQL draft after app restart", async () => {
     const localPersistence = createInMemoryLocalPersistence({
       databaseConnections: [
