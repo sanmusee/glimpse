@@ -1,4 +1,4 @@
-use mysql::prelude::Queryable;
+use mysql::{prelude::Queryable, Value as MySqlValue};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -142,6 +142,8 @@ struct SqlExecutionResult {
     row_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     columns: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rows: Option<Vec<Vec<serde_json::Value>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_message: Option<String>,
 }
@@ -538,11 +540,16 @@ fn read_remote_database_catalog(
     })
 }
 
-fn sql_execution_success(row_count: i64, columns: Vec<String>) -> SqlExecutionResult {
+fn sql_execution_success(
+    row_count: i64,
+    columns: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+) -> SqlExecutionResult {
     SqlExecutionResult {
         ok: true,
         row_count: Some(row_count),
         columns: Some(columns),
+        rows: Some(rows),
         error_message: None,
     }
 }
@@ -552,7 +559,43 @@ fn sql_execution_failure(message: impl Into<String>) -> SqlExecutionResult {
         ok: false,
         row_count: None,
         columns: None,
+        rows: None,
         error_message: Some(message.into()),
+    }
+}
+
+fn mysql_value_to_json(value: MySqlValue) -> serde_json::Value {
+    match value {
+        MySqlValue::NULL => serde_json::Value::Null,
+        MySqlValue::Bytes(bytes) => {
+            serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+        }
+        MySqlValue::Int(value) => serde_json::json!(value),
+        MySqlValue::UInt(value) => serde_json::json!(value),
+        MySqlValue::Float(value) => serde_json::json!(value),
+        MySqlValue::Double(value) => serde_json::json!(value),
+        MySqlValue::Date(year, month, day, hour, minute, second, micros) => {
+            let value = if micros == 0 {
+                format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+            } else {
+                format!(
+                    "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{micros:06}"
+                )
+            };
+
+            serde_json::Value::String(value)
+        }
+        MySqlValue::Time(is_negative, days, hours, minutes, seconds, micros) => {
+            let sign = if is_negative { "-" } else { "" };
+            let total_hours = days * 24 + u32::from(hours);
+            let value = if micros == 0 {
+                format!("{sign}{total_hours:02}:{minutes:02}:{seconds:02}")
+            } else {
+                format!("{sign}{total_hours:02}:{minutes:02}:{seconds:02}.{micros:06}")
+            };
+
+            serde_json::Value::String(value)
+        }
     }
 }
 
@@ -1149,10 +1192,14 @@ fn execute_sql(
         .map(|column| column.name_str().into_owned())
         .collect::<Vec<_>>();
     let mut row_count = 0;
+    let mut rows = Vec::new();
 
     for row in result.by_ref() {
         match row {
-            Ok(_) => row_count += 1,
+            Ok(row) => {
+                row_count += 1;
+                rows.push(row.unwrap().into_iter().map(mysql_value_to_json).collect());
+            }
             Err(error) => {
                 return Ok(sql_execution_failure(format!(
                     "SQL execution failed: {error}"
@@ -1161,7 +1208,7 @@ fn execute_sql(
         }
     }
 
-    Ok(sql_execution_success(row_count, columns))
+    Ok(sql_execution_success(row_count, columns, rows))
 }
 
 #[tauri::command]

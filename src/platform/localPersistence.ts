@@ -137,11 +137,15 @@ export interface SqlExecutionInput {
   safetyMode: ExecutionSafetyMode;
 }
 
+export type SqlResultCellValue = string | number | boolean | null;
+export type SqlResultRow = SqlResultCellValue[];
+
 export type SqlExecutionResult =
   | {
       ok: true;
       rowCount: number;
       columns: string[];
+      rows: SqlResultRow[];
     }
   | {
       ok: false;
@@ -622,7 +626,11 @@ function isSqlExecutionResult(value: unknown): value is SqlExecutionResult {
 
   const candidate = value as Record<string, unknown>;
   if (candidate.ok === true) {
-    return typeof candidate.rowCount === "number" && Array.isArray(candidate.columns);
+    return (
+      typeof candidate.rowCount === "number" &&
+      Array.isArray(candidate.columns) &&
+      Array.isArray(candidate.rows)
+    );
   }
 
   return candidate.ok === false && typeof candidate.errorMessage === "string";

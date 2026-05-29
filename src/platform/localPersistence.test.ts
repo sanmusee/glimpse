@@ -385,6 +385,10 @@ describe("local persistence boundary", () => {
           ok: true,
           rowCount: 2,
           columns: ["id", "amount"],
+          rows: [
+            [1, 10],
+            [2, 20],
+          ],
         };
       }
 
@@ -401,6 +405,10 @@ describe("local persistence boundary", () => {
       ok: true,
       rowCount: 2,
       columns: ["id", "amount"],
+      rows: [
+        [1, 10],
+        [2, 20],
+      ],
     });
 
     expect(calls).toEqual([
