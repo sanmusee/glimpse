@@ -109,6 +109,7 @@ export function App({
   const [hasGeneratedSql, setHasGeneratedSql] = useState(false);
   const [selectedCandidateTableName, setSelectedCandidateTableName] = useState("");
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
+  const [activeDialog, setActiveDialog] = useState<"preferences" | null>(null);
   const userSelectedThemePreference = useRef(false);
 
   useEffect(() => {
@@ -866,30 +867,33 @@ export function App({
   };
 
   return (
-    <main aria-label="Glimpse workbench" className="app-shell">
-      <aside className="sidebar sidebar-left" aria-label="Session and catalog">
+    <main aria-label="Glimpse V0.2 workbench" className="app-shell">
+      <header className="workbench-toolbar" role="toolbar" aria-label="V0.2 workbench toolbar">
+        <button type="button">Data Source Management</button>
+        <button type="button">Model Provider Management</button>
+        <button
+          type="button"
+          onClick={() => databaseConnections[0] && createQuerySession(databaseConnections[0])}
+          disabled={!databaseConnections.length}
+        >
+          New Console
+        </button>
+        <button type="button" onClick={() => setActiveDialog("preferences")}>
+          Preferences
+        </button>
+        <button type="button" onClick={runSqlExecution} disabled={!currentQuerySession}>
+          SQL Run
+        </button>
+      </header>
+
+      <section className="sidebar sidebar-left" aria-label="Database Connection Tree">
         <header className="brand-bar">
           <div className="brand-mark">G</div>
           <div>
             <strong>Glimpse</strong>
-            <span>V0.1 Workbench</span>
+            <span>V0.2 Workbench</span>
           </div>
         </header>
-
-        <section className="panel">
-          <div className="panel-title">Preferences</div>
-          <label className="field">
-            <span>Theme preference</span>
-            <select
-              value={themePreference}
-              onChange={(event) => updateThemePreference(event.target.value as ThemePreference)}
-            >
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </label>
-        </section>
 
         <section className="panel">
           <div className="panel-title">Database</div>
@@ -1023,7 +1027,7 @@ export function App({
             </div>
           )}
         </section>
-      </aside>
+      </section>
 
       <section className="workspace">
         <section aria-label="SQL editor" className="panel editor-panel">
@@ -1056,7 +1060,7 @@ export function App({
           </div>
         </section>
 
-        <section aria-label="Query results" className="panel results-panel">
+        <section aria-label="Active Console Result Set" className="panel results-panel">
           <div className="panel-title">Result</div>
           {executionWarnings.length ? (
             <div className="execution-warning" role="status">
@@ -1112,7 +1116,15 @@ export function App({
         </section>
       </section>
 
-      <aside className="sidebar sidebar-right" aria-label="AI assistant and context">
+      <section className="sidebar sidebar-right" aria-label="Right-side Content Switcher">
+        <div className="right-side-switcher" role="tablist" aria-label="Right-side views">
+          <button type="button" role="tab" aria-selected="true">
+            SQL Console List
+          </button>
+          <button type="button" role="tab" aria-selected="false">
+            AI Conversation View
+          </button>
+        </div>
         <section aria-label="AI assistant" className="panel">
           <div className="panel-title">AI Assistant</div>
           <label className="field">
@@ -1376,7 +1388,36 @@ export function App({
             </button>
           </div>
         </section>
-      </aside>
+      </section>
+
+      {activeDialog === "preferences" ? (
+        <div className="dialog-backdrop">
+          <section
+            aria-label="Preferences"
+            role="dialog"
+            aria-modal="true"
+            className="dialog panel"
+          >
+            <div className="panel-title">
+              <span>Preferences</span>
+              <button type="button" onClick={() => setActiveDialog(null)}>
+                Close
+              </button>
+            </div>
+            <label className="field">
+              <span>Theme preference</span>
+              <select
+                value={themePreference}
+                onChange={(event) => updateThemePreference(event.target.value as ThemePreference)}
+              >
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }
