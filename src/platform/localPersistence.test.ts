@@ -176,4 +176,107 @@ describe("local persistence boundary", () => {
       { command: "delete_database_connection", args: { id: "db-2" } },
     ]);
   });
+
+  it("routes query sessions through SQLite commands and strips result rows from execution metadata", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const restoredSession = {
+      id: "session-1",
+      databaseConnectionId: "db-1",
+      connectionName: "Warehouse",
+      defaultDatabase: "analytics",
+      sqlDraft: "select 1",
+      aiConversationHistory: [],
+      executionResultMetadata: [],
+      createdAt: "2026-05-29T00:00:00.000Z",
+      updatedAt: "2026-05-29T00:00:00.000Z",
+    };
+    const localPersistence = createTauriLocalPersistence(async (command, args) => {
+      calls.push({ command, args });
+
+      if (command === "list_query_sessions") {
+        return [restoredSession];
+      }
+
+      if (
+        command === "create_query_session" ||
+        command === "get_restored_query_session" ||
+        command === "save_query_session_sql_draft" ||
+        command === "save_query_session_ai_conversation_history" ||
+        command === "save_query_session_execution_metadata"
+      ) {
+        return restoredSession;
+      }
+
+      return null;
+    });
+
+    await expect(localPersistence.querySessions.listQuerySessions()).resolves.toEqual([
+      restoredSession,
+    ]);
+    await localPersistence.querySessions.createQuerySession({ databaseConnectionId: "db-1" });
+    await localPersistence.querySessions.getRestoredQuerySession();
+    await localPersistence.querySessions.saveSqlDraft("session-1", "select * from orders");
+    await localPersistence.querySessions.saveAiConversationHistory("session-1", [
+      {
+        id: "message-1",
+        role: "user",
+        content: "show revenue",
+        createdAt: "2026-05-29T00:01:00.000Z",
+      },
+    ]);
+    await localPersistence.querySessions.saveExecutionResultMetadata("session-1", [
+      {
+        id: "execution-1",
+        sql: "select * from orders",
+        rowCount: 2,
+        columns: ["id", "amount"],
+        executedAt: "2026-05-29T00:02:00.000Z",
+        resultRows: [{ id: 1, amount: "sensitive-row-value" }],
+      } as never,
+    ]);
+
+    expect(JSON.stringify(calls)).not.toContain("sensitive-row-value");
+    expect(calls).toEqual([
+      { command: "list_query_sessions", args: undefined },
+      {
+        command: "create_query_session",
+        args: { input: { databaseConnectionId: "db-1" } },
+      },
+      { command: "get_restored_query_session", args: undefined },
+      {
+        command: "save_query_session_sql_draft",
+        args: { sessionId: "session-1", sqlDraft: "select * from orders" },
+      },
+      {
+        command: "save_query_session_ai_conversation_history",
+        args: {
+          sessionId: "session-1",
+          entries: [
+            {
+              id: "message-1",
+              role: "user",
+              content: "show revenue",
+              createdAt: "2026-05-29T00:01:00.000Z",
+            },
+          ],
+        },
+      },
+      {
+        command: "save_query_session_execution_metadata",
+        args: {
+          sessionId: "session-1",
+          metadata: [
+            {
+              id: "execution-1",
+              sql: "select * from orders",
+              rowCount: 2,
+              columns: ["id", "amount"],
+              executedAt: "2026-05-29T00:02:00.000Z",
+              errorMessage: undefined,
+            },
+          ],
+        },
+      },
+    ]);
+  });
 });

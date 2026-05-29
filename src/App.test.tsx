@@ -256,4 +256,69 @@ describe("Glimpse app shell", () => {
     await screen.findByText(/streaming ai response/i);
     expect(aiProviderTester).toHaveBeenCalledTimes(2);
   });
+
+  it("creates a query session for a saved database connection and binds the SQL draft editor to it", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+    });
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+
+    expect(await screen.findByText(/warehouse \/ analytics/i)).toBeInTheDocument();
+    const sqlEditor = screen.getByRole("textbox", { name: /sql draft/i });
+
+    fireEvent.change(sqlEditor, { target: { value: "select * from orders" } });
+
+    await waitFor(() => expect(sqlEditor).toHaveValue("select * from orders"));
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      databaseConnectionId: "db-1",
+      connectionName: "Warehouse",
+      defaultDatabase: "analytics",
+      sqlDraft: "select * from orders",
+      aiConversationHistory: [],
+      executionResultMetadata: [],
+    });
+  });
+
+  it("restores the most recent query session and SQL draft after app restart", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+    });
+    const { unmount } = render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: /sql draft/i }), {
+      target: { value: "select count(*) from orders" },
+    });
+    await screen.findByDisplayValue("select count(*) from orders");
+
+    unmount();
+    render(<App localPersistence={localPersistence} />);
+
+    expect(await screen.findByText(/warehouse \/ analytics/i)).toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue(
+      "select count(*) from orders",
+    );
+  });
 });

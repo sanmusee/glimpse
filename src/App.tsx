@@ -11,6 +11,7 @@ import {
   type DatabaseConnectionInput,
   type GlobalAiConfiguration,
   type LocalPersistence,
+  type QuerySession,
   type ThemePreference,
 } from "./platform/localPersistence";
 
@@ -53,6 +54,8 @@ export function App({
 }: AppProps) {
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [databaseConnections, setDatabaseConnections] = useState<DatabaseConnection[]>([]);
+  const [querySessions, setQuerySessions] = useState<QuerySession[]>([]);
+  const [currentQuerySession, setCurrentQuerySession] = useState<QuerySession | null>(null);
   const [databaseConnectionForm, setDatabaseConnectionForm] =
     useState<DatabaseConnectionInput>(emptyDatabaseConnectionForm);
   const [connectionTestMessage, setConnectionTestMessage] = useState<string | null>(null);
@@ -74,6 +77,26 @@ export function App({
 
       setThemePreference(storedThemePreference);
       document.documentElement.setAttribute("data-theme", storedThemePreference);
+    });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [localPersistence]);
+
+  useEffect(() => {
+    let isCurrent = true;
+
+    Promise.all([
+      localPersistence.querySessions.listQuerySessions(),
+      localPersistence.querySessions.getRestoredQuerySession(),
+    ]).then(([sessions, restoredSession]) => {
+      if (!isCurrent) {
+        return;
+      }
+
+      setQuerySessions(sessions);
+      setCurrentQuerySession(restoredSession);
     });
 
     return () => {
@@ -176,6 +199,43 @@ export function App({
     await localPersistence.databaseConnections.deleteDatabaseConnection(connection.id);
     setDatabaseConnections((currentConnections) =>
       currentConnections.filter((currentConnection) => currentConnection.id !== connection.id),
+    );
+  };
+
+  const createQuerySession = async (connection: DatabaseConnection) => {
+    const createdSession = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: connection.id,
+    });
+
+    setCurrentQuerySession(createdSession);
+    setQuerySessions((currentSessions) => [
+      createdSession,
+      ...currentSessions.filter((session) => session.id !== createdSession.id),
+    ]);
+  };
+
+  const updateSqlDraft = async (sqlDraft: string) => {
+    if (!currentQuerySession) {
+      return;
+    }
+
+    const optimisticSession = { ...currentQuerySession, sqlDraft };
+    setCurrentQuerySession(optimisticSession);
+    setQuerySessions((currentSessions) =>
+      currentSessions.map((session) =>
+        session.id === optimisticSession.id ? optimisticSession : session,
+      ),
+    );
+
+    const savedSession = await localPersistence.querySessions.saveSqlDraft(
+      currentQuerySession.id,
+      sqlDraft,
+    );
+    setCurrentQuerySession(savedSession);
+    setQuerySessions((currentSessions) =>
+      currentSessions.map((session) =>
+        session.id === savedSession.id ? savedSession : session,
+      ),
     );
   };
 
@@ -346,6 +406,9 @@ export function App({
                       <button type="button" onClick={() => deleteDatabaseConnection(connection)}>
                         Delete {connection.name}
                       </button>
+                      <button type="button" onClick={() => createQuerySession(connection)}>
+                        New session for {connection.name}
+                      </button>
                     </div>
                   </article>
                 ))
@@ -356,17 +419,40 @@ export function App({
 
         <section className="panel">
           <div className="panel-title">Query Sessions</div>
-          <div className="placeholder-row">No saved sessions yet</div>
+          {querySessions.length === 0 ? (
+            <div className="placeholder-row">No saved sessions yet</div>
+          ) : (
+            <div className="session-list" aria-label="Saved query sessions">
+              {querySessions.map((session) => (
+                <button
+                  className="session-row"
+                  type="button"
+                  key={session.id}
+                  onClick={() => setCurrentQuerySession(session)}
+                >
+                  <strong>{session.connectionName}</strong>
+                  <span>
+                    {session.connectionName} / {session.defaultDatabase}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </section>
       </aside>
 
       <section className="workspace">
         <section aria-label="SQL editor" className="panel editor-panel">
           <div className="panel-title">SQL Draft</div>
-          <pre className="editor-surface">
-            {`-- AI-generated SQL will appear here.
+          <textarea
+            aria-label="SQL Draft"
+            className="editor-surface"
+            disabled={!currentQuerySession}
+            onChange={(event) => updateSqlDraft(event.target.value)}
+            placeholder={`-- AI-generated SQL will appear here.
 -- Review it before running in Read-only Mode.`}
-          </pre>
+            value={currentQuerySession?.sqlDraft ?? ""}
+          />
         </section>
 
         <section aria-label="Query results" className="panel results-panel">
