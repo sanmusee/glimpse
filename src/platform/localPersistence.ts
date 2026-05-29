@@ -160,6 +160,8 @@ export interface QuerySessionStore {
   listQuerySessions(): Promise<QuerySession[]>;
   createQuerySession(input: { databaseConnectionId: string }): Promise<QuerySession>;
   getRestoredQuerySession(): Promise<QuerySession | null>;
+  openQuerySession(sessionId: string): Promise<QuerySession>;
+  deleteQuerySession(sessionId: string): Promise<void>;
   saveSqlDraft(sessionId: string, sqlDraft: string): Promise<QuerySession>;
   saveCandidateTables(
     sessionId: string,
@@ -356,6 +358,30 @@ export function createInMemoryLocalPersistence(initial?: {
 
         return mostRecentSession ?? null;
       },
+      async openQuerySession(sessionId) {
+        const session = querySessions.get(sessionId);
+
+        if (!session) {
+          throw new Error("Query Session was not found");
+        }
+
+        const updatedSession = {
+          ...session,
+          updatedAt: new Date().toISOString(),
+        };
+        querySessions.set(sessionId, updatedSession);
+        currentQuerySessionId = sessionId;
+
+        return updatedSession;
+      },
+      async deleteQuerySession(sessionId) {
+        querySessions.delete(sessionId);
+
+        if (currentQuerySessionId === sessionId) {
+          const [mostRecentSession] = await this.listQuerySessions();
+          currentQuerySessionId = mostRecentSession?.id ?? null;
+        }
+      },
       async saveSqlDraft(sessionId, sqlDraft) {
         const session = querySessions.get(sessionId);
 
@@ -536,6 +562,13 @@ export function createTauriLocalPersistence(invoke: TauriInvoke = tauriInvoke): 
       async getRestoredQuerySession() {
         const session = await invoke("get_restored_query_session");
         return session ? (session as QuerySession) : null;
+      },
+      async openQuerySession(sessionId) {
+        const session = await invoke("open_query_session", { sessionId });
+        return session as QuerySession;
+      },
+      async deleteQuerySession(sessionId) {
+        await invoke("delete_query_session", { sessionId });
       },
       async saveSqlDraft(sessionId, sqlDraft) {
         const session = await invoke("save_query_session_sql_draft", {

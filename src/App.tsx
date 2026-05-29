@@ -289,18 +289,45 @@ export function App({
       databaseConnectionId: connection.id,
     });
 
-    openQuerySession(createdSession);
+    openCreatedQuerySession(createdSession);
     setQuerySessions((currentSessions) => [
       createdSession,
       ...currentSessions.filter((session) => session.id !== createdSession.id),
     ]);
   };
 
-  const openQuerySession = (session: QuerySession) => {
+  const openCreatedQuerySession = (session: QuerySession) => {
     setCurrentQuerySession(session);
     setExecutionStatus("");
     setExecutionWarnings([]);
     setCurrentResultSet(null);
+  };
+
+  const openQuerySession = async (session: QuerySession) => {
+    const openedSession = await localPersistence.querySessions.openQuerySession(session.id);
+
+    setCurrentQuerySession(openedSession);
+    setQuerySessions((currentSessions) => [
+      openedSession,
+      ...currentSessions.filter((currentSession) => currentSession.id !== openedSession.id),
+    ]);
+    setExecutionStatus("");
+    setExecutionWarnings([]);
+    setCurrentResultSet(null);
+  };
+
+  const deleteQuerySession = async (session: QuerySession) => {
+    await localPersistence.querySessions.deleteQuerySession(session.id);
+    const remainingSessions = await localPersistence.querySessions.listQuerySessions();
+
+    setQuerySessions(remainingSessions);
+    if (currentQuerySession?.id === session.id) {
+      const restoredSession = await localPersistence.querySessions.getRestoredQuerySession();
+      setCurrentQuerySession(restoredSession);
+      setExecutionStatus("");
+      setExecutionWarnings([]);
+      setCurrentResultSet(null);
+    }
   };
 
   const updateCurrentQuerySession = (updatedSession: QuerySession) => {
@@ -970,17 +997,28 @@ export function App({
           ) : (
             <div className="session-list" aria-label="Saved query sessions">
               {querySessions.map((session) => (
-                <button
-                  className="session-row"
-                  type="button"
-                  key={session.id}
-                  onClick={() => openQuerySession(session)}
-                >
-                  <strong>{session.connectionName}</strong>
-                  <span>
-                    {session.connectionName} / {session.defaultDatabase}
-                  </span>
-                </button>
+                <article className="session-row" key={session.id}>
+                  <button
+                    className="session-open-button"
+                    type="button"
+                    aria-label={`Open query session ${session.connectionName} ${session.defaultDatabase} ${formatSessionSqlPreview(session)}`}
+                    onClick={() => openQuerySession(session)}
+                  >
+                    <strong>{session.connectionName}</strong>
+                    <span>
+                      {session.connectionName} / {session.defaultDatabase}
+                    </span>
+                    <small>{formatSessionSqlPreview(session)}</small>
+                  </button>
+                  <button
+                    className="session-delete-button"
+                    type="button"
+                    aria-label={`Delete query session ${session.connectionName} ${session.defaultDatabase} ${formatSessionSqlPreview(session)}`}
+                    onClick={() => deleteQuerySession(session)}
+                  >
+                    Delete
+                  </button>
+                </article>
               ))}
             </div>
           )}
@@ -1204,6 +1242,23 @@ export function App({
           </form>
         </section>
 
+        <section aria-label="AI conversation history" className="panel">
+          <div className="panel-title">AI Conversation History</div>
+          {currentQuerySession?.aiConversationHistory.length ? (
+            <div className="conversation-list">
+              {currentQuerySession.aiConversationHistory.map((entry) => (
+                <article className="conversation-row" key={entry.id}>
+                  <strong>{entry.role === "user" ? "User" : "Assistant"}</strong>
+                  <span>{entry.createdAt}</span>
+                  <p>{entry.content}</p>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="placeholder-row">No AI conversation yet</div>
+          )}
+        </section>
+
         <section className="panel">
           <section aria-label="Database catalog" className="catalog-panel">
             <div className="panel-title">Database Catalog</div>
@@ -1418,6 +1473,12 @@ function formatResultCell(value: SqlResultCellValue | undefined) {
   }
 
   return String(value);
+}
+
+function formatSessionSqlPreview(session: QuerySession) {
+  const normalizedDraft = session.sqlDraft.trim().replace(/\s+/g, " ");
+
+  return normalizedDraft ? normalizedDraft.slice(0, 80) : "Empty SQL draft";
 }
 
 function formatCatalogError(error: unknown) {

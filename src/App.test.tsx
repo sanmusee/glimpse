@@ -520,6 +520,146 @@ describe("Glimpse app shell", () => {
     );
   });
 
+  it("opens a historical Query Session with its saved draft, context, conversation, and execution metadata without result rows", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+    });
+    const historicalSession = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(
+      historicalSession.id,
+      "select id, private_value from orders limit 1",
+    );
+    await localPersistence.querySessions.saveCandidateTables(historicalSession.id, [
+      { name: "orders", reason: "Contains private order facts" },
+    ]);
+    await localPersistence.querySessions.saveAiConversationHistory(historicalSession.id, [
+      {
+        id: "message-1",
+        role: "user",
+        content: "Show one private order",
+        createdAt: "2026-05-29T10:00:00.000Z",
+      },
+      {
+        id: "message-2",
+        role: "assistant",
+        content: "select id, private_value from orders limit 1",
+        createdAt: "2026-05-29T10:00:01.000Z",
+      },
+    ]);
+    await localPersistence.querySessions.saveExecutionResultMetadata(historicalSession.id, [
+      {
+        id: "execution-1",
+        sql: "select id, private_value from orders limit 1",
+        rowCount: 1,
+        columns: ["id", "private_value"],
+        executedAt: "2026-05-29T10:01:00.000Z",
+        resultRows: [[1, "sensitive-row-value"]],
+      } as never,
+      {
+        id: "execution-2",
+        sql: "select missing_column from orders limit 1",
+        rowCount: 0,
+        columns: [],
+        executedAt: "2026-05-29T10:02:00.000Z",
+        errorMessage: "Unknown column 'missing_column'",
+      },
+    ]);
+    const currentSession = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(currentSession.id, "select 42");
+
+    render(<App localPersistence={localPersistence} />);
+
+    expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue("select 42");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /open query session warehouse analytics select id, private_value/i,
+      }),
+    );
+
+    expect(await screen.findByRole("textbox", { name: /sql draft/i })).toHaveValue(
+      "select id, private_value from orders limit 1",
+    );
+    expect(screen.getByRole("region", { name: /candidate table set/i }))
+      .toHaveTextContent("Contains private order facts");
+    expect(screen.getByRole("region", { name: /ai conversation history/i }))
+      .toHaveTextContent("Show one private order");
+    expect(screen.getByRole("region", { name: /ai conversation history/i }))
+      .toHaveTextContent("select id, private_value from orders limit 1");
+    expect(screen.getByLabelText(/execution result metadata/i))
+      .toHaveTextContent("Succeeded: 1 rows");
+    expect(screen.getByLabelText(/execution result metadata/i))
+      .toHaveTextContent("Failed: Unknown column 'missing_column'");
+    expect(screen.getByLabelText(/execution result metadata/i))
+      .toHaveTextContent("2026-05-29T10:01:00.000Z");
+    expect(screen.queryByRole("table", { name: /current result set/i })).not.toBeInTheDocument();
+    expect(screen.queryByText("sensitive-row-value")).not.toBeInTheDocument();
+  });
+
+  it("deletes one historical Query Session without changing the currently open session", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "analytics",
+        },
+      ],
+    });
+    const sessionToDelete = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(sessionToDelete.id, "select * from orders");
+    const currentSession = await localPersistence.querySessions.createQuerySession({
+      databaseConnectionId: "db-1",
+    });
+    await localPersistence.querySessions.saveSqlDraft(currentSession.id, "select count(*)");
+
+    render(<App localPersistence={localPersistence} />);
+
+    expect(await screen.findByRole("textbox", { name: /sql draft/i }))
+      .toHaveValue("select count(*)");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /delete query session warehouse analytics select \* from orders/i,
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: /open query session warehouse analytics select \* from orders/i,
+        }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("textbox", { name: /sql draft/i })).toHaveValue("select count(*)");
+    await expect(localPersistence.querySessions.listQuerySessions()).resolves.toEqual([
+      expect.objectContaining({
+        id: currentSession.id,
+        sqlDraft: "select count(*)",
+      }),
+    ]);
+  });
+
   it("discovers candidate tables from a natural-language query and keeps the Query Session context adjustable", async () => {
     const localPersistence = createInMemoryLocalPersistence({
       aiConfiguration: {

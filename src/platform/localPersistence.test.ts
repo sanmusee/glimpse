@@ -285,6 +285,7 @@ describe("local persistence boundary", () => {
       if (
         command === "create_query_session" ||
         command === "get_restored_query_session" ||
+        command === "open_query_session" ||
         command === "save_query_session_sql_draft" ||
         command === "save_query_session_ai_conversation_history" ||
         command === "save_query_session_execution_metadata"
@@ -300,6 +301,7 @@ describe("local persistence boundary", () => {
     ]);
     await localPersistence.querySessions.createQuerySession({ databaseConnectionId: "db-1" });
     await localPersistence.querySessions.getRestoredQuerySession();
+    await localPersistence.querySessions.openQuerySession("session-1");
     await localPersistence.querySessions.saveSqlDraft("session-1", "select * from orders");
     await localPersistence.querySessions.saveAiConversationHistory("session-1", [
       {
@@ -322,6 +324,7 @@ describe("local persistence boundary", () => {
         resultRows: [{ id: 1, amount: "sensitive-row-value" }],
       } as never,
     ]);
+    await localPersistence.querySessions.deleteQuerySession("session-1");
 
     expect(JSON.stringify(calls)).not.toContain("sensitive-row-value");
     expect(calls).toEqual([
@@ -331,6 +334,7 @@ describe("local persistence boundary", () => {
         args: { input: { databaseConnectionId: "db-1" } },
       },
       { command: "get_restored_query_session", args: undefined },
+      { command: "open_query_session", args: { sessionId: "session-1" } },
       {
         command: "save_query_session_sql_draft",
         args: { sessionId: "session-1", sqlDraft: "select * from orders" },
@@ -372,6 +376,7 @@ describe("local persistence boundary", () => {
           ],
         },
       },
+      { command: "delete_query_session", args: { sessionId: "session-1" } },
     ]);
   });
 

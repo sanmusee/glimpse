@@ -261,6 +261,45 @@ button:disabled {
   padding: 7px 8px;
 }
 
+.session-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px;
+}
+
+.session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.session-open-button {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  text-align: left;
+}
+
+.session-open-button strong,
+.session-open-button span,
+.session-open-button small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-open-button span,
+.session-open-button small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-delete-button {
+  padding: 7px 8px;
+}
+
 .empty-state,
 .placeholder-row {
   margin: 12px;
@@ -402,6 +441,31 @@ button:disabled {
   color: var(--muted);
   font-size: 12px;
   margin-top: 4px;
+}
+
+.conversation-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px;
+}
+
+.conversation-row {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.conversation-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.conversation-row p {
+  margin: 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .catalog-panel {
