@@ -74,6 +74,18 @@ interface CurrentResultSet {
   rows: SqlResultRow[];
 }
 
+interface ConsoleExecutionState {
+  status: string;
+  warnings: string[];
+  resultSet: CurrentResultSet | null;
+}
+
+const emptyConsoleExecutionState: ConsoleExecutionState = {
+  status: "",
+  warnings: [],
+  resultSet: null,
+};
+
 const emptyAiConfigurationForm: AiConfigurationFormState = {
   baseUrl: "",
   apiKey: "",
@@ -138,6 +150,9 @@ export function App({
   const [executionStatus, setExecutionStatus] = useState("");
   const [executionWarnings, setExecutionWarnings] = useState<string[]>([]);
   const [currentResultSet, setCurrentResultSet] = useState<CurrentResultSet | null>(null);
+  const [consoleExecutionStates, setConsoleExecutionStates] = useState<
+    Record<string, ConsoleExecutionState>
+  >({});
   const [hasGeneratedSql, setHasGeneratedSql] = useState(false);
   const [selectedCandidateTableName, setSelectedCandidateTableName] = useState("");
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
@@ -151,6 +166,14 @@ export function App({
   const userSelectedThemePreference = useRef(false);
   const selectedDatabaseConnection =
     databaseConnections.find((connection) => connection.id === selectedDatabaseConnectionId) ?? null;
+  const activeConsoleExecutionState = currentQuerySession
+    ? (consoleExecutionStates[currentQuerySession.id] ?? emptyConsoleExecutionState)
+    : {
+        ...emptyConsoleExecutionState,
+        status: executionStatus,
+        warnings: executionWarnings,
+        resultSet: currentResultSet,
+      };
 
   useEffect(() => {
     let isCurrent = true;
@@ -463,6 +486,29 @@ export function App({
     ]);
   };
 
+  const updateQuerySessionInState = (updatedSession: QuerySession) => {
+    setCurrentQuerySession((currentSession) =>
+      currentSession?.id === updatedSession.id ? updatedSession : currentSession,
+    );
+    setQuerySessions((currentSessions) => [
+      updatedSession,
+      ...currentSessions.filter((session) => session.id !== updatedSession.id),
+    ]);
+  };
+
+  const updateConsoleExecutionState = (
+    sessionId: string,
+    nextState: Partial<ConsoleExecutionState>,
+  ) => {
+    setConsoleExecutionStates((currentStates) => ({
+      ...currentStates,
+      [sessionId]: {
+        ...(currentStates[sessionId] ?? emptyConsoleExecutionState),
+        ...nextState,
+      },
+    }));
+  };
+
   const updateSqlDraftInState = (sessionId: string, sqlDraft: string) => {
     setCurrentQuerySession((currentSession) =>
       currentSession?.id === sessionId ? { ...currentSession, sqlDraft } : currentSession,
@@ -710,21 +756,25 @@ export function App({
     }
 
     const validation = validateSqlForExecution(currentQuerySession.sqlDraft, "readOnly");
-    setExecutionWarnings(validation.warnings);
+    updateConsoleExecutionState(currentQuerySession.id, { warnings: validation.warnings });
 
     if (!validation.normalizedSql) {
-      setExecutionStatus("SQL draft is required");
+      updateConsoleExecutionState(currentQuerySession.id, { status: "SQL draft is required" });
       return;
     }
 
     if (!validation.canExecute) {
-      setExecutionStatus(validation.blockedReason ?? "SQL is blocked in Read-only Mode");
+      updateConsoleExecutionState(currentQuerySession.id, {
+        status: validation.blockedReason ?? "SQL is blocked in Read-only Mode",
+      });
       return;
     }
 
     const executionSession = currentQuerySession;
-    setExecutionStatus("Running SQL in Read-only Mode");
-    setCurrentResultSet(null);
+    updateConsoleExecutionState(executionSession.id, {
+      status: "Running SQL in Read-only Mode",
+      resultSet: null,
+    });
 
     try {
       const result = await localPersistence.sqlExecution.executeSql({
@@ -754,13 +804,13 @@ export function App({
         [...executionSession.executionResultMetadata, metadata],
       );
 
-      updateCurrentQuerySession(savedSession);
-      setCurrentResultSet(result.ok ? { columns: result.columns, rows: result.rows } : null);
-      setExecutionStatus(
-        result.ok
+      updateQuerySessionInState(savedSession);
+      updateConsoleExecutionState(executionSession.id, {
+        resultSet: result.ok ? { columns: result.columns, rows: result.rows } : null,
+        status: result.ok
           ? `Execution succeeded: ${result.rowCount} rows, ${result.columns.length} columns`
           : `Execution failed: ${result.errorMessage}`,
-      );
+      });
     } catch (error) {
       const message = formatSqlExecutionError(error);
       const metadata: ExecutionResultMetadata = {
@@ -776,8 +826,11 @@ export function App({
         [...executionSession.executionResultMetadata, metadata],
       );
 
-      updateCurrentQuerySession(savedSession);
-      setExecutionStatus(`Execution failed: ${message}`);
+      updateQuerySessionInState(savedSession);
+      updateConsoleExecutionState(executionSession.id, {
+        resultSet: null,
+        status: `Execution failed: ${message}`,
+      });
     }
   };
 
@@ -873,11 +926,11 @@ export function App({
   };
 
   const copyVisibleResults = async () => {
-    if (!currentResultSet) {
+    if (!activeConsoleExecutionState.resultSet) {
       return;
     }
 
-    await copyText(formatResultSetForCopy(currentResultSet));
+    await copyText(formatResultSetForCopy(activeConsoleExecutionState.resultSet));
   };
 
   const addCandidateTable = async () => {
@@ -1204,14 +1257,14 @@ export function App({
 
         <section aria-label="Active Console Result Set" className="panel results-panel">
           <div className="panel-title">Result</div>
-          {executionWarnings.length ? (
+          {activeConsoleExecutionState.warnings.length ? (
             <div className="execution-warning" role="status">
-              {executionWarnings.join(" ")}
+              {activeConsoleExecutionState.warnings.join(" ")}
             </div>
           ) : null}
-          {executionStatus ? (
+          {activeConsoleExecutionState.status ? (
             <div className="execution-status" role="status">
-              {executionStatus}
+              {activeConsoleExecutionState.status}
             </div>
           ) : (
             <div className="empty-state">
@@ -1228,14 +1281,17 @@ export function App({
               Repair SQL
             </button>
           ) : null}
-          {currentResultSet ? (
+          {activeConsoleExecutionState.resultSet ? (
             <>
               <div className="result-actions">
                 <button type="button" onClick={copyVisibleResults}>
                   Copy visible results
                 </button>
               </div>
-              <ResultTable resultSet={currentResultSet} onCopyText={copyText} />
+              <ResultTable
+                resultSet={activeConsoleExecutionState.resultSet}
+                onCopyText={copyText}
+              />
             </>
           ) : null}
           {currentQuerySession?.executionResultMetadata.length ? (
