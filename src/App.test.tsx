@@ -1,7 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import type { GenerateSqlFromQueryNeedInput, ModifySqlFromIntentInput } from "./sqlGeneration";
+import type {
+  GenerateSqlFromQueryNeedInput,
+  ModifySqlFromIntentInput,
+  RepairSqlFromExecutionErrorInput,
+} from "./sqlGeneration";
 import {
   AI_PROVIDER_API_KEY_SECRET_ID,
   createInMemoryLocalPersistence,
@@ -824,7 +828,7 @@ describe("Glimpse app shell", () => {
     });
   });
 
-  it("persists failed read-only execution metadata without starting SQL repair", async () => {
+  it("persists failed read-only execution metadata and offers SQL repair without starting it automatically", async () => {
     const localPersistence = createInMemoryLocalPersistence({
       databaseConnections: [
         {
@@ -853,7 +857,7 @@ describe("Glimpse app shell", () => {
 
     expect(await screen.findByText(/execution failed: unknown column 'missing_column'/i))
       .toBeInTheDocument();
-    expect(screen.queryByText(/repair/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /repair sql/i })).toBeInTheDocument();
     await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
       executionResultMetadata: [
         expect.objectContaining({
@@ -864,6 +868,96 @@ describe("Glimpse app shell", () => {
         }),
       ],
     });
+  });
+
+  it("repairs SQL after an execution failure, streams it into the editor, and stores the repair conversation", async () => {
+    const localPersistence = createInMemoryLocalPersistence({
+      aiConfiguration: {
+        baseUrl: "https://ai.example.test/v1",
+        model: "glimpse-sql",
+        temperature: 0.2,
+        maxTokens: 1000,
+      },
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      readDatabaseCatalog: () => warehouseCatalogWithCustomers,
+      executeSql: () => ({
+        ok: false,
+        errorMessage: "Unknown column 'missing_column'",
+      }),
+    });
+    await localPersistence.secrets.setSecret(AI_PROVIDER_API_KEY_SECRET_ID, "sk-test-secret");
+    const sqlRepairer = vi.fn(async ({ onPartialSql }: RepairSqlFromExecutionErrorInput) => {
+      onPartialSql?.("select id");
+      onPartialSql?.("select id from orders limit 10");
+
+      return "select id from orders limit 10";
+    });
+
+    render(<App localPersistence={localPersistence} sqlRepairer={sqlRepairer} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /open catalog warehouse/i }));
+    expect(await screen.findByText("customers")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
+    const sqlEditor = await screen.findByRole("textbox", { name: /sql draft/i });
+    fireEvent.change(sqlEditor, {
+      target: { value: "select missing_column from orders limit 10" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: /add candidate table/i }), {
+      target: { value: "orders" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^add candidate table$/i }));
+    expect(await screen.findByRole("button", { name: /remove orders/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+    expect(await screen.findByText(/execution failed: unknown column 'missing_column'/i))
+      .toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: /repair sql/i }));
+
+    await waitFor(() => expect(sqlEditor).toHaveValue("select id from orders limit 10"));
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      sqlDraft: "select id from orders limit 10",
+      aiConversationHistory: [
+        expect.objectContaining({
+          role: "user",
+          content:
+            "Repair SQL after execution error: Unknown column 'missing_column'",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          content: "select id from orders limit 10",
+        }),
+      ],
+      executionResultMetadata: [
+        expect.objectContaining({
+          sql: "select missing_column from orders limit 10",
+          errorMessage: "Unknown column 'missing_column'",
+        }),
+      ],
+    });
+    expect(sqlRepairer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentSql: "select missing_column from orders limit 10",
+        errorMessage: "Unknown column 'missing_column'",
+        dialect: "mysql",
+        apiKey: "sk-test-secret",
+        session: expect.objectContaining({
+          candidateTables: [{ name: "orders", reason: "Added by user" }],
+        }),
+        catalog: expect.objectContaining({
+          database: "warehouse",
+        }),
+      }),
+    );
   });
 
   it("blocks write SQL before execution in Read-only Mode", async () => {

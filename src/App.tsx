@@ -9,6 +9,8 @@ import {
   type GenerateSqlFromQueryNeedInput,
   modifySqlFromIntent,
   type ModifySqlFromIntentInput,
+  repairSqlFromExecutionError,
+  type RepairSqlFromExecutionErrorInput,
 } from "./sqlGeneration";
 import {
   runStreamingAiProviderTest,
@@ -40,6 +42,7 @@ interface AppProps {
   ) => Promise<CandidateTable[]>;
   sqlGenerator?: (input: GenerateSqlFromQueryNeedInput) => Promise<string>;
   sqlModifier?: (input: ModifySqlFromIntentInput) => Promise<string>;
+  sqlRepairer?: (input: RepairSqlFromExecutionErrorInput) => Promise<string>;
 }
 
 interface AiConfigurationFormState {
@@ -73,6 +76,7 @@ export function App({
   candidateTableDiscoverer = discoverCandidateTables,
   sqlGenerator = generateSqlFromQueryNeed,
   sqlModifier = modifySqlFromIntent,
+  sqlRepairer = repairSqlFromExecutionError,
 }: AppProps) {
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [databaseConnections, setDatabaseConnections] = useState<DatabaseConnection[]>([]);
@@ -628,6 +632,97 @@ export function App({
     }
   };
 
+  const runSqlRepair = async () => {
+    if (!currentQuerySession) {
+      setSqlGenerationStatus("Create a Query Session before repairing SQL");
+      return;
+    }
+
+    const failedExecution = getLatestFailedExecution(currentQuerySession);
+    if (!failedExecution) {
+      setSqlGenerationStatus("Run SQL and capture an execution error before repair");
+      return;
+    }
+
+    const repairCatalog =
+      activeCatalog ??
+      (await localPersistence.databaseCatalogs.getCatalogForSqlGeneration(
+        currentQuerySession.databaseConnectionId,
+      ));
+    if (!repairCatalog) {
+      setSqlGenerationStatus("Open a catalog before repairing SQL");
+      return;
+    }
+
+    const configuration: GlobalAiConfiguration = {
+      baseUrl: aiConfigurationForm.baseUrl.trim(),
+      model: aiConfigurationForm.model.trim(),
+      temperature: Number(aiConfigurationForm.temperature),
+      maxTokens: Number(aiConfigurationForm.maxTokens),
+    };
+    const apiKey =
+      aiConfigurationForm.apiKey ||
+      (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID));
+
+    if (!configuration.baseUrl || !configuration.model || !apiKey) {
+      setSqlGenerationStatus("AI configuration and API key are required");
+      return;
+    }
+
+    const repairSession = currentQuerySession;
+    let streamedSql = "";
+    setHasGeneratedSql(false);
+    setSqlGenerationStatus("Repairing SQL");
+
+    try {
+      const repairedSql = await sqlRepairer({
+        currentSql: failedExecution.sql,
+        errorMessage: failedExecution.errorMessage,
+        dialect: "mysql",
+        session: repairSession,
+        catalog: repairCatalog,
+        configuration,
+        apiKey,
+        onPartialSql: (partialSql) => {
+          streamedSql = partialSql;
+          updateSqlDraftInState(repairSession.id, partialSql);
+        },
+      });
+      const finalSql = repairedSql || streamedSql;
+      updateSqlDraftInState(repairSession.id, finalSql);
+
+      const savedDraftSession = await localPersistence.querySessions.saveSqlDraft(
+        repairSession.id,
+        finalSql,
+      );
+      const savedConversationSession =
+        await localPersistence.querySessions.saveAiConversationHistory(repairSession.id, [
+          ...repairSession.aiConversationHistory,
+          {
+            id: createUiLocalId(),
+            role: "user",
+            content: `Repair SQL after execution error: ${failedExecution.errorMessage}`,
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: createUiLocalId(),
+            role: "assistant",
+            content: finalSql,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+
+      updateCurrentQuerySession({
+        ...savedConversationSession,
+        sqlDraft: savedDraftSession.sqlDraft,
+      });
+      setHasGeneratedSql(true);
+      setSqlGenerationStatus("SQL repaired. Review it before manual execution.");
+    } catch (error) {
+      setSqlGenerationStatus(formatSqlRepairError(error));
+    }
+  };
+
   const addCandidateTable = async () => {
     if (!selectedCandidateTableName || !currentQuerySession) {
       return;
@@ -896,6 +991,15 @@ export function App({
               <p>Results will appear here after manual read-only execution.</p>
             </div>
           )}
+          {currentQuerySession && getLatestFailedExecution(currentQuerySession) ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={runSqlRepair}
+            >
+              Repair SQL
+            </button>
+          ) : null}
           {currentQuerySession?.executionResultMetadata.length ? (
             <div className="execution-metadata-list" aria-label="Execution result metadata">
               {currentQuerySession.executionResultMetadata.map((metadata) => (
@@ -1185,8 +1289,27 @@ function formatSqlGenerationError(error: unknown) {
   return `SQL generation failed: ${message}`;
 }
 
+function formatSqlRepairError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return `SQL repair failed: ${message}`;
+}
+
 function formatSqlExecutionError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function getLatestFailedExecution(
+  session: QuerySession,
+): (ExecutionResultMetadata & { errorMessage: string }) | null {
+  return (
+    session.executionResultMetadata
+      .slice()
+      .reverse()
+      .find(
+        (metadata): metadata is ExecutionResultMetadata & { errorMessage: string } =>
+          Boolean(metadata.errorMessage),
+      ) ?? null
+  );
 }
 
 function createUiLocalId() {

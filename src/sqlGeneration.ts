@@ -17,6 +17,14 @@ export interface SqlModificationRequestInput {
   catalog: DatabaseCatalogSnapshot;
 }
 
+export interface SqlRepairRequestInput {
+  currentSql: string;
+  errorMessage: string;
+  dialect: string;
+  session: QuerySession;
+  catalog: DatabaseCatalogSnapshot;
+}
+
 export interface SqlGenerationModelRequest {
   messages: Array<{ role: "system" | "user"; content: string }>;
 }
@@ -43,6 +51,13 @@ export interface GenerateSqlFromQueryNeedInput extends SqlGenerationRequestInput
 }
 
 export interface ModifySqlFromIntentInput extends SqlModificationRequestInput {
+  configuration: GlobalAiConfiguration;
+  apiKey: string;
+  fetchModel?: FetchLike;
+  onPartialSql?: (sql: string) => void;
+}
+
+export interface RepairSqlFromExecutionErrorInput extends SqlRepairRequestInput {
   configuration: GlobalAiConfiguration;
   apiKey: string;
   fetchModel?: FetchLike;
@@ -111,6 +126,40 @@ export function buildSqlModificationRequest({
   };
 }
 
+export function buildSqlRepairRequest({
+  currentSql,
+  errorMessage,
+  dialect,
+  session,
+  catalog,
+}: SqlRepairRequestInput): SqlGenerationModelRequest {
+  const catalogContext = buildCandidateCatalogContext(session, catalog);
+
+  return {
+    messages: [
+      {
+        role: "system",
+        content:
+          "Repair the failed SQL using the database error and schema context. Return only the repaired SQL text, with no explanation or markdown fences. Preserve the user's intent when possible. Use only the provided default schema and candidate table context.",
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          currentSql,
+          errorMessage,
+          dialect,
+          querySession: {
+            id: session.id,
+            defaultDatabase: session.defaultDatabase,
+            candidateTables: session.candidateTables,
+          },
+          defaultSchemaCatalog: catalogContext,
+        }),
+      },
+    ],
+  };
+}
+
 export async function generateSqlFromQueryNeed({
   queryNeed,
   session,
@@ -155,6 +204,35 @@ export async function modifySqlFromIntent({
     fetchModel,
     onPartialSql,
     failureLabel: "SQL modification",
+  });
+}
+
+export async function repairSqlFromExecutionError({
+  currentSql,
+  errorMessage,
+  dialect,
+  session,
+  catalog,
+  configuration,
+  apiKey,
+  fetchModel = fetch,
+  onPartialSql,
+}: RepairSqlFromExecutionErrorInput): Promise<string> {
+  const request = buildSqlRepairRequest({
+    currentSql,
+    errorMessage,
+    dialect,
+    session,
+    catalog,
+  });
+
+  return streamSqlCompletion({
+    request,
+    configuration,
+    apiKey,
+    fetchModel,
+    onPartialSql,
+    failureLabel: "SQL repair",
   });
 }
 
