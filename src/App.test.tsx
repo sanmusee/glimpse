@@ -82,13 +82,46 @@ describe("Glimpse app shell", () => {
     document.documentElement.removeAttribute("data-theme");
   });
 
-  it("opens directly into the SQL editor-first workbench with setup empty states", () => {
+  it("opens into the V0.2 workbench shell with only confirmed toolbar entry points", () => {
     render(<App localPersistence={createInMemoryLocalPersistence()} />);
 
-    expect(screen.getByRole("main", { name: /glimpse workbench/i })).toBeInTheDocument();
-    expect(screen.queryByText(/first-run wizard/i)).not.toBeInTheDocument();
+    const workbench = screen.getByRole("main", { name: /glimpse v0\.2 workbench/i });
+    expect(workbench).toBeInTheDocument();
+    expect(screen.getByRole("toolbar", { name: /v0\.2 workbench toolbar/i })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /database connection tree/i }))
+      .toBeInTheDocument();
     expect(screen.getByRole("region", { name: /sql editor/i })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: /query results/i })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /right-side content switcher/i }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /active console result set/i }))
+      .toBeInTheDocument();
+
+    const toolbarButtons = screen
+      .getAllByRole("button")
+      .filter((button) => button.closest('[role="toolbar"]'))
+      .map((button) => button.textContent);
+    expect(toolbarButtons).toEqual([
+      "Data Source Management",
+      "Model Provider Management",
+      "New Console",
+      "Preferences",
+      "SQL Run",
+    ]);
+    expect(workbench).not.toHaveTextContent("Theme preference");
+  });
+
+  it("opens directly into the V0.2 SQL workbench with setup empty states", () => {
+    render(<App localPersistence={createInMemoryLocalPersistence()} />);
+
+    expect(screen.getByRole("main", { name: /glimpse v0\.2 workbench/i })).toBeInTheDocument();
+    expect(screen.queryByText(/first-run wizard/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /database connection tree/i }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /sql editor/i })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /active console result set/i }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /right-side content switcher/i }))
+      .toBeInTheDocument();
     expect(screen.getByRole("region", { name: /ai assistant/i })).toBeInTheDocument();
     expect(screen.getByText(/configure global ai provider/i)).toBeInTheDocument();
     expect(screen.getByText(/create database connection/i)).toBeInTheDocument();
@@ -97,7 +130,7 @@ describe("Glimpse app shell", () => {
   it("does not expose V0.1 out-of-scope entry points", () => {
     render(<App localPersistence={createInMemoryLocalPersistence()} />);
 
-    const workbench = screen.getByRole("main", { name: /glimpse workbench/i });
+    const workbench = screen.getByRole("main", { name: /glimpse v0\.2 workbench/i });
     [
       /ssh tunnel/i,
       /csv export/i,
@@ -118,7 +151,11 @@ describe("Glimpse app shell", () => {
       const localPersistence = createInMemoryLocalPersistence();
       const { unmount } = render(<App localPersistence={localPersistence} />);
 
+      expect(screen.queryByRole("combobox", { name: /theme preference/i })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /^preferences$/i }));
+      const preferencesDialog = screen.getByRole("dialog", { name: /preferences/i });
       const themeSelect = screen.getByRole("combobox", { name: /theme preference/i });
+      expect(preferencesDialog).toContainElement(themeSelect);
 
       if (themePreference === "system") {
         fireEvent.change(themeSelect, { target: { value: "light" } });
@@ -138,6 +175,7 @@ describe("Glimpse app shell", () => {
       unmount();
       render(<App localPersistence={localPersistence} />);
 
+      fireEvent.click(screen.getByRole("button", { name: /^preferences$/i }));
       await waitFor(() =>
         expect(screen.getByRole("combobox", { name: /theme preference/i })).toHaveValue(
           themePreference,

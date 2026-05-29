@@ -60,28 +60,50 @@
 body {
   margin: 0;
   min-width: 1080px;
+  min-height: 100vh;
   background: var(--app-bg);
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-columns: 260px minmax(520px, 1fr) 340px;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
   padding: 12px;
+  overflow: hidden;
+}
+
+.workbench-toolbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  padding: 8px;
+}
+
+.workbench-toolbar button {
+  white-space: nowrap;
 }
 
 .sidebar,
 .workspace {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow: auto;
 }
 
 .workspace {
   display: grid;
   grid-template-rows: minmax(320px, 1fr) minmax(220px, 0.72fr);
+  overflow: hidden;
 }
 
 .brand-bar,
@@ -97,6 +119,39 @@ body {
   align-items: center;
   gap: 10px;
   padding: 12px;
+}
+
+.right-side-switcher {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.right-side-switcher button[aria-selected="true"] {
+  background: #2f7c63;
+  border-color: #3a9a7a;
+  color: #ffffff;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 0.45);
+  padding: 24px;
+}
+
+.dialog {
+  width: min(520px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.dialog .panel-title {
+  justify-content: space-between;
 }
 
 .brand-bar span {
