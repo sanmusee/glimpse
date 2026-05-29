@@ -194,6 +194,11 @@ button {
   margin-top: 10px;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -284,5 +289,94 @@ button {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 13px;
   line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.catalog-panel {
+  display: block;
+}
+
+.catalog-toolbar {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.catalog-toolbar .secondary-button {
+  margin-top: 12px;
+}
+
+.catalog-content {
+  display: grid;
+  gap: 10px;
+  max-height: 460px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.catalog-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.catalog-summary strong {
+  color: var(--text);
+}
+
+.catalog-table {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.catalog-table header strong,
+.catalog-table header span {
+  display: block;
+}
+
+.catalog-table header span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.catalog-subtitle {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.catalog-table ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.catalog-table li {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.catalog-table li small {
+  display: block;
+  color: var(--muted);
+}
+
+.ddl-block {
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--editor-border);
+  border-radius: 7px;
+  background: var(--editor-bg);
+  color: var(--editor-text);
+  margin: 0;
+  padding: 10px;
   white-space: pre-wrap;
 }

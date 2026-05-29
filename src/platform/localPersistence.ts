@@ -53,11 +53,47 @@ export type DatabaseConnectionTestResult =
   | { ok: true; message: string }
   | { ok: false; message: string };
 
+export interface DatabaseCatalogColumn {
+  name: string;
+  dataType: string;
+  nullable: boolean;
+  defaultValue: string | null;
+  comment: string;
+  isPrimaryKey: boolean;
+}
+
+export interface DatabaseCatalogIndex {
+  name: string;
+  kind: "primary" | "unique" | "index";
+  columns: string[];
+}
+
+export interface DatabaseCatalogTable {
+  name: string;
+  comment: string;
+  columns: DatabaseCatalogColumn[];
+  indexes: DatabaseCatalogIndex[];
+  createTableDdl: string | null;
+}
+
+export interface DatabaseCatalogSnapshot {
+  connectionId: string;
+  database: string;
+  refreshedAt: string;
+  tables: DatabaseCatalogTable[];
+}
+
 export interface DatabaseConnectionStore {
   listDatabaseConnections(): Promise<DatabaseConnection[]>;
   saveDatabaseConnection(input: DatabaseConnectionInput): Promise<DatabaseConnection>;
   deleteDatabaseConnection(id: string): Promise<void>;
   testDatabaseConnection(input: DatabaseConnectionInput): Promise<DatabaseConnectionTestResult>;
+}
+
+export interface DatabaseCatalogStore {
+  openConnectionCatalog(connectionId: string): Promise<DatabaseCatalogSnapshot>;
+  refreshCatalog(connectionId: string): Promise<DatabaseCatalogSnapshot>;
+  getCatalogForSqlGeneration(connectionId: string): Promise<DatabaseCatalogSnapshot | null>;
 }
 
 export interface QuerySession {
@@ -108,6 +144,7 @@ export interface LocalPersistence {
   aiConfiguration: AiConfigurationStore;
   secrets: SecretStore;
   databaseConnections: DatabaseConnectionStore;
+  databaseCatalogs: DatabaseCatalogStore;
   querySessions: QuerySessionStore;
 }
 
@@ -122,6 +159,9 @@ export function createInMemoryLocalPersistence(initial?: {
   testDatabaseConnection?: (
     input: DatabaseConnectionInput,
   ) => Promise<DatabaseConnectionTestResult> | DatabaseConnectionTestResult;
+  readDatabaseCatalog?: (
+    connection: DatabaseConnection,
+  ) => Promise<DatabaseCatalogSnapshot> | DatabaseCatalogSnapshot;
 }): LocalPersistence {
   let themePreference = initial?.themePreference ?? "system";
   let aiConfiguration = initial?.aiConfiguration ?? null;
@@ -129,8 +169,29 @@ export function createInMemoryLocalPersistence(initial?: {
   const databaseConnections = new Map<string, DatabaseConnection>(
     initial?.databaseConnections?.map((connection) => [connection.id, connection]) ?? [],
   );
+  const catalogCache = new Map<string, DatabaseCatalogSnapshot>();
   const querySessions = new Map<string, QuerySession>();
   let currentQuerySessionId: string | null = null;
+
+  const readDatabaseCatalog = async (connectionId: string) => {
+    const connection = databaseConnections.get(connectionId);
+
+    if (!connection) {
+      throw new Error("Database connection was not found");
+    }
+
+    const catalog = initial?.readDatabaseCatalog
+      ? await initial.readDatabaseCatalog(connection)
+      : {
+          connectionId: connection.id,
+          database: connection.defaultDatabase,
+          refreshedAt: new Date().toISOString(),
+          tables: [],
+        };
+
+    catalogCache.set(connectionId, catalog);
+    return catalog;
+  };
 
   return {
     preferences: {
@@ -188,6 +249,7 @@ export function createInMemoryLocalPersistence(initial?: {
       async deleteDatabaseConnection(id) {
         const existingConnection = databaseConnections.get(id);
         databaseConnections.delete(id);
+        catalogCache.delete(id);
 
         if (existingConnection) {
           secrets.delete(existingConnection.passwordSecretId);
@@ -199,6 +261,17 @@ export function createInMemoryLocalPersistence(initial?: {
         }
 
         return { ok: true, message: "Connection test succeeded" };
+      },
+    },
+    databaseCatalogs: {
+      async openConnectionCatalog(connectionId) {
+        return readDatabaseCatalog(connectionId);
+      },
+      async refreshCatalog(connectionId) {
+        return readDatabaseCatalog(connectionId);
+      },
+      async getCatalogForSqlGeneration(connectionId) {
+        return catalogCache.get(connectionId) ?? null;
       },
     },
     querySessions: {
@@ -367,6 +440,20 @@ export function createTauriLocalPersistence(invoke: TauriInvoke = tauriInvoke): 
           : { ok: false, message: "Connection test returned an invalid response" };
       },
     },
+    databaseCatalogs: {
+      async openConnectionCatalog(connectionId) {
+        const catalog = await invoke("open_connection_catalog", { connectionId });
+        return assertDatabaseCatalogSnapshot(catalog);
+      },
+      async refreshCatalog(connectionId) {
+        const catalog = await invoke("refresh_connection_catalog", { connectionId });
+        return assertDatabaseCatalogSnapshot(catalog);
+      },
+      async getCatalogForSqlGeneration(connectionId) {
+        const catalog = await invoke("get_cached_catalog", { connectionId });
+        return catalog === null ? null : assertDatabaseCatalogSnapshot(catalog);
+      },
+    },
     querySessions: {
       async listQuerySessions() {
         const sessions = await invoke("list_query_sessions");
@@ -445,6 +532,28 @@ function isDatabaseConnectionTestResult(
 
   const candidate = value as { ok?: unknown; message?: unknown };
   return typeof candidate.ok === "boolean" && typeof candidate.message === "string";
+}
+
+function assertDatabaseCatalogSnapshot(value: unknown): DatabaseCatalogSnapshot {
+  if (!isDatabaseCatalogSnapshot(value)) {
+    throw new Error("Catalog command returned an invalid response");
+  }
+
+  return value;
+}
+
+function isDatabaseCatalogSnapshot(value: unknown): value is DatabaseCatalogSnapshot {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.connectionId === "string" &&
+    typeof candidate.database === "string" &&
+    typeof candidate.refreshedAt === "string" &&
+    Array.isArray(candidate.tables)
+  );
 }
 
 function stripResultRowsFromExecutionMetadata(

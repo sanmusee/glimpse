@@ -2,7 +2,7 @@ use mysql::prelude::Queryable;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 use tauri::Manager;
 
 const THEME_PREFERENCE_KEY: &str = "theme_preference";
@@ -38,6 +38,50 @@ struct DatabaseConnectionTestInput {
 struct DatabaseConnectionTestResult {
     ok: bool,
     message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseCatalogColumn {
+    name: String,
+    data_type: String,
+    nullable: bool,
+    default_value: Option<String>,
+    comment: String,
+    is_primary_key: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseCatalogIndex {
+    name: String,
+    kind: String,
+    columns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseCatalogTable {
+    name: String,
+    comment: String,
+    columns: Vec<DatabaseCatalogColumn>,
+    indexes: Vec<DatabaseCatalogIndex>,
+    create_table_ddl: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseCatalogSnapshot {
+    connection_id: String,
+    database: String,
+    refreshed_at: String,
+    tables: Vec<DatabaseCatalogTable>,
+}
+
+#[derive(Clone, Debug)]
+struct IndexAccumulator {
+    kind: String,
+    columns: Vec<(u32, String)>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -153,6 +197,18 @@ fn open_local_store(app: &tauri::AppHandle) -> Result<Connection, String> {
 
     connection
         .execute(
+            "CREATE TABLE IF NOT EXISTS database_catalog_cache (
+                connection_id TEXT PRIMARY KEY,
+                catalog_json TEXT NOT NULL,
+                refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(connection_id) REFERENCES database_connections(id) ON DELETE CASCADE
+            )",
+            [],
+        )
+        .map_err(|error| format!("failed to prepare database catalog cache table: {error}"))?;
+
+    connection
+        .execute(
             "CREATE TABLE IF NOT EXISTS query_sessions (
                 id TEXT PRIMARY KEY,
                 database_connection_id TEXT NOT NULL,
@@ -226,6 +282,219 @@ fn validate_database_connection(connection: &DatabaseConnectionRecord) -> Result
 fn keychain_entry(secret_id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, secret_id)
         .map_err(|error| format!("failed to open Keychain entry: {error}"))
+}
+
+fn read_database_connection_record(
+    local_store: &Connection,
+    id: &str,
+) -> Result<DatabaseConnectionRecord, String> {
+    local_store
+        .query_row(
+            "SELECT id, name, host, port, username, password_secret_id, default_database
+             FROM database_connections
+             WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(DatabaseConnectionRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    host: row.get(2)?,
+                    port: row.get(3)?,
+                    username: row.get(4)?,
+                    password_secret_id: row.get(5)?,
+                    default_database: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("failed to read database connection: {error}"))?
+        .ok_or_else(|| "database connection was not found".to_string())
+}
+
+fn current_catalog_timestamp(local_store: &Connection) -> Result<String, String> {
+    local_store
+        .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| format!("failed to create catalog timestamp: {error}"))
+}
+
+fn save_catalog_cache(
+    local_store: &Connection,
+    catalog: &DatabaseCatalogSnapshot,
+) -> Result<(), String> {
+    let catalog_json = serde_json::to_string(catalog)
+        .map_err(|error| format!("failed to serialize catalog cache: {error}"))?;
+
+    local_store
+        .execute(
+            "INSERT INTO database_catalog_cache (connection_id, catalog_json, refreshed_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(connection_id) DO UPDATE SET
+                catalog_json = excluded.catalog_json,
+                refreshed_at = CURRENT_TIMESTAMP",
+            params![catalog.connection_id, catalog_json],
+        )
+        .map_err(|error| format!("failed to save catalog cache: {error}"))?;
+
+    Ok(())
+}
+
+fn quote_mysql_identifier(identifier: &str) -> String {
+    format!("`{}`", identifier.replace('`', "``"))
+}
+
+fn metadata_failure(error: impl std::fmt::Display) -> String {
+    format!("Metadata Permission Failure: failed to read database metadata: {error}")
+}
+
+fn read_remote_database_catalog(
+    local_store: &Connection,
+    connection: &DatabaseConnectionRecord,
+) -> Result<DatabaseCatalogSnapshot, String> {
+    let password = get_secret(connection.password_secret_id.clone())?
+        .ok_or_else(|| "Saved password was not found in Keychain".to_string())?;
+    let default_database = connection.default_database.clone();
+    let builder = mysql::OptsBuilder::new()
+        .ip_or_hostname(Some(connection.host.clone()))
+        .tcp_port(connection.port)
+        .user(Some(connection.username.clone()))
+        .pass(Some(password))
+        .db_name(Some(default_database.clone()));
+    let pool = mysql::Pool::new(builder).map_err(metadata_failure)?;
+    let mut database_connection = pool.get_conn().map_err(metadata_failure)?;
+
+    let table_rows: Vec<(String, String)> = database_connection
+        .exec(
+            "SELECT TABLE_NAME, COALESCE(TABLE_COMMENT, '')
+             FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+             ORDER BY TABLE_NAME",
+            (default_database.clone(),),
+        )
+        .map_err(metadata_failure)?;
+    let column_rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        u32,
+    )> = database_connection
+        .exec(
+            "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE,
+                        COLUMN_DEFAULT, COALESCE(COLUMN_COMMENT, ''), COLUMN_KEY, ORDINAL_POSITION
+                 FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = ?
+                 ORDER BY TABLE_NAME, ORDINAL_POSITION",
+            (default_database.clone(),),
+        )
+        .map_err(metadata_failure)?;
+    let index_rows: Vec<(String, String, u8, u32, String)> = database_connection
+        .exec(
+            "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME
+             FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = ?
+             ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX",
+            (default_database.clone(),),
+        )
+        .map_err(metadata_failure)?;
+
+    let mut columns_by_table: BTreeMap<String, Vec<DatabaseCatalogColumn>> = BTreeMap::new();
+    for (
+        table_name,
+        column_name,
+        data_type,
+        nullable,
+        default_value,
+        comment,
+        column_key,
+        _ordinal_position,
+    ) in column_rows
+    {
+        columns_by_table
+            .entry(table_name)
+            .or_default()
+            .push(DatabaseCatalogColumn {
+                name: column_name,
+                data_type,
+                nullable: nullable == "YES",
+                default_value,
+                comment,
+                is_primary_key: column_key == "PRI",
+            });
+    }
+
+    let mut indexes_by_table: BTreeMap<String, BTreeMap<String, IndexAccumulator>> =
+        BTreeMap::new();
+    for (table_name, index_name, non_unique, sequence, column_name) in index_rows {
+        let kind = if index_name == "PRIMARY" {
+            "primary"
+        } else if non_unique == 0 {
+            "unique"
+        } else {
+            "index"
+        };
+        let index_entry = indexes_by_table
+            .entry(table_name)
+            .or_default()
+            .entry(index_name)
+            .or_insert_with(|| IndexAccumulator {
+                kind: kind.to_string(),
+                columns: Vec::new(),
+            });
+
+        index_entry.columns.push((sequence, column_name));
+    }
+
+    let mut tables = Vec::new();
+    for (table_name, table_comment) in table_rows {
+        let ddl_query = format!(
+            "SHOW CREATE TABLE {}.{}",
+            quote_mysql_identifier(&default_database),
+            quote_mysql_identifier(&table_name)
+        );
+        let create_table_ddl = database_connection
+            .query_first::<(String, String), _>(ddl_query)
+            .map_err(metadata_failure)?
+            .map(|(_table_name, create_statement)| create_statement);
+        let indexes = indexes_by_table
+            .remove(&table_name)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(index_name, mut index)| {
+                index
+                    .columns
+                    .sort_by_key(|(sequence, _column_name)| *sequence);
+                DatabaseCatalogIndex {
+                    name: index_name,
+                    kind: index.kind,
+                    columns: index
+                        .columns
+                        .into_iter()
+                        .map(|(_sequence, column_name)| column_name)
+                        .collect(),
+                }
+            })
+            .collect();
+
+        tables.push(DatabaseCatalogTable {
+            name: table_name.clone(),
+            comment: table_comment,
+            columns: columns_by_table.remove(&table_name).unwrap_or_default(),
+            indexes,
+            create_table_ddl,
+        });
+    }
+
+    Ok(DatabaseCatalogSnapshot {
+        connection_id: connection.id.clone(),
+        database: default_database,
+        refreshed_at: current_catalog_timestamp(local_store)?,
+        tables,
+    })
 }
 
 fn parse_json_array<T: DeserializeOwned>(value: String) -> Result<Vec<T>, String> {
@@ -514,12 +783,63 @@ fn delete_database_connection(app: tauri::AppHandle, id: String) -> Result<(), S
     local_store
         .execute("DELETE FROM database_connections WHERE id = ?1", [&id])
         .map_err(|error| format!("failed to delete database connection: {error}"))?;
+    local_store
+        .execute(
+            "DELETE FROM database_catalog_cache WHERE connection_id = ?1",
+            [&id],
+        )
+        .map_err(|error| format!("failed to delete database catalog cache: {error}"))?;
 
     if let Some(secret_id) = password_secret_id {
         delete_secret(secret_id)?;
     }
 
     Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_cached_catalog(
+    app: tauri::AppHandle,
+    connection_id: String,
+) -> Result<Option<DatabaseCatalogSnapshot>, String> {
+    let local_store = open_local_store(&app)?;
+    let catalog_json = local_store
+        .query_row(
+            "SELECT catalog_json FROM database_catalog_cache WHERE connection_id = ?1",
+            [&connection_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("failed to read catalog cache: {error}"))?;
+
+    catalog_json
+        .map(|json| {
+            serde_json::from_str(&json)
+                .map_err(|error| format!("failed to parse catalog cache: {error}"))
+        })
+        .transpose()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn open_connection_catalog(
+    app: tauri::AppHandle,
+    connection_id: String,
+) -> Result<DatabaseCatalogSnapshot, String> {
+    refresh_connection_catalog(app, connection_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn refresh_connection_catalog(
+    app: tauri::AppHandle,
+    connection_id: String,
+) -> Result<DatabaseCatalogSnapshot, String> {
+    let local_store = open_local_store(&app)?;
+    let connection = read_database_connection_record(&local_store, &connection_id)?;
+    let catalog = read_remote_database_catalog(&local_store, &connection)?;
+
+    save_catalog_cache(&local_store, &catalog)?;
+
+    Ok(catalog)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -812,6 +1132,9 @@ pub fn run() {
             save_database_connection,
             delete_database_connection,
             test_database_connection,
+            get_cached_catalog,
+            open_connection_catalog,
+            refresh_connection_catalog,
             list_query_sessions,
             create_query_session,
             get_restored_query_session,
