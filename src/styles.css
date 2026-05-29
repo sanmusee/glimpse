@@ -450,6 +450,52 @@ button:disabled {
   font-size: 12px;
 }
 
+.connection-tree-schema {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0 4px 12px;
+  border-left: 1px solid var(--divider);
+  padding-left: 10px;
+}
+
+.connection-tree-schema strong,
+.connection-tree-schema span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-tree-schema span,
+.connection-tree-table,
+.connection-tree-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.connection-tree-table-list {
+  display: grid;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.connection-tree-table {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-tree-empty {
+  margin-top: 4px;
+}
+
+.connection-tree-status {
+  margin: 2px 0 4px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .connection-row {
   display: grid;
   gap: 8px;

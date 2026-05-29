@@ -118,6 +118,9 @@ export function App({
   const [connectionTestMessage, setConnectionTestMessage] = useState<string | null>(null);
   const [activeCatalog, setActiveCatalog] = useState<DatabaseCatalogSnapshot | null>(null);
   const [catalogStatus, setCatalogStatus] = useState<string | null>(null);
+  const [expandedCatalogConnectionId, setExpandedCatalogConnectionId] = useState<string | null>(
+    null,
+  );
   const [aiConfigurationForm, setAiConfigurationForm] = useState<AiConfigurationFormState>(
     emptyAiConfigurationForm,
   );
@@ -323,9 +326,13 @@ export function App({
     if (activeCatalog?.connectionId === connection.id) {
       setActiveCatalog(null);
     }
+    if (expandedCatalogConnectionId === connection.id) {
+      setExpandedCatalogConnectionId(null);
+    }
   };
 
   const openCatalog = async (connection: DatabaseConnection) => {
+    setExpandedCatalogConnectionId(connection.id);
     setCatalogStatus(`Reading catalog for ${connection.defaultDatabase}`);
 
     try {
@@ -1030,26 +1037,70 @@ export function App({
             {databaseConnections.length === 0 ? (
               <div className="placeholder-row">No saved connections yet</div>
             ) : (
-              databaseConnections.map((connection) => (
-                <article className="connection-tree-row" key={connection.id}>
-                  <div
-                    aria-label={`${connection.name} ${connection.defaultDatabase}`}
-                    className="connection-tree-item"
-                    role="treeitem"
-                  >
-                    <strong>{connection.name}</strong>
-                    <span>{connection.defaultDatabase}</span>
-                  </div>
-                  <div className="connection-tree-actions">
-                    <button type="button" onClick={() => openCatalog(connection)}>
-                      Open catalog {connection.name}
-                    </button>
-                    <button type="button" onClick={() => createQuerySession(connection)}>
-                      New session for {connection.name}
-                    </button>
-                  </div>
-                </article>
-              ))
+              databaseConnections.map((connection) => {
+                const isExpanded = expandedCatalogConnectionId === connection.id;
+                const treeCatalog =
+                  activeCatalog?.connectionId === connection.id ? activeCatalog : null;
+
+                return (
+                  <article className="connection-tree-row" key={connection.id}>
+                    <div
+                      aria-label={`${connection.name} ${connection.defaultDatabase}`}
+                      className="connection-tree-item"
+                      aria-expanded={isExpanded}
+                      role="treeitem"
+                    >
+                      <strong>{connection.name}</strong>
+                      <span>{connection.defaultDatabase}</span>
+                    </div>
+                    {isExpanded && treeCatalog ? (
+                      <div
+                        aria-label={`Default schema ${treeCatalog.database}`}
+                        className="connection-tree-schema"
+                        role="treeitem"
+                      >
+                        <strong>Default Schema</strong>
+                        <span>{treeCatalog.database}</span>
+                        {treeCatalog.tables.length ? (
+                          <div className="connection-tree-table-list" role="group">
+                            {treeCatalog.tables.map((table) => (
+                              <div
+                                aria-label={`Table ${table.name}`}
+                                className="connection-tree-table"
+                                key={table.name}
+                                role="treeitem"
+                              >
+                                {table.name}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="connection-tree-empty">
+                            No tables available in {treeCatalog.database}
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                    {isExpanded && !treeCatalog && catalogStatus ? (
+                      <div className="connection-tree-status" role="status">
+                        {catalogStatus}
+                      </div>
+                    ) : null}
+                    <div className="connection-tree-actions">
+                      <button
+                        aria-label={`Expand ${connection.name} open catalog ${connection.name}`}
+                        type="button"
+                        onClick={() => openCatalog(connection)}
+                      >
+                        Expand {connection.name}
+                      </button>
+                      <button type="button" onClick={() => createQuerySession(connection)}>
+                        New session for {connection.name}
+                      </button>
+                    </div>
+                  </article>
+                );
+              })
             )}
           </div>
         </section>
