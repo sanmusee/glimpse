@@ -1,12 +1,17 @@
 import "./styles.css";
 import { useEffect, useRef, useState } from "react";
 import {
+  discoverCandidateTables,
+  type DiscoverCandidateTablesInput,
+} from "./candidateTableDiscovery";
+import {
   runStreamingAiProviderTest,
   type AiProviderTestResult,
 } from "./aiProviderTestClient";
 import {
   AI_PROVIDER_API_KEY_SECRET_ID,
   defaultLocalPersistence,
+  type CandidateTable,
   type DatabaseConnection,
   type DatabaseConnectionInput,
   type DatabaseCatalogSnapshot,
@@ -22,6 +27,9 @@ interface AppProps {
     configuration: GlobalAiConfiguration,
     apiKey: string,
   ) => Promise<AiProviderTestResult>;
+  candidateTableDiscoverer?: (
+    input: DiscoverCandidateTablesInput,
+  ) => Promise<CandidateTable[]>;
 }
 
 interface AiConfigurationFormState {
@@ -52,6 +60,7 @@ const emptyDatabaseConnectionForm: DatabaseConnectionInput = {
 export function App({
   localPersistence = defaultLocalPersistence,
   aiProviderTester = runStreamingAiProviderTest,
+  candidateTableDiscoverer = discoverCandidateTables,
 }: AppProps) {
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [databaseConnections, setDatabaseConnections] = useState<DatabaseConnection[]>([]);
@@ -67,6 +76,9 @@ export function App({
   );
   const [aiConfigurationStatus, setAiConfigurationStatus] = useState("Not configured");
   const [aiProviderTestStatus, setAiProviderTestStatus] = useState("");
+  const [queryNeed, setQueryNeed] = useState("");
+  const [candidateTableStatus, setCandidateTableStatus] = useState("");
+  const [selectedCandidateTableName, setSelectedCandidateTableName] = useState("");
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
   const userSelectedThemePreference = useRef(false);
 
@@ -251,6 +263,14 @@ export function App({
     ]);
   };
 
+  const updateCurrentQuerySession = (updatedSession: QuerySession) => {
+    setCurrentQuerySession(updatedSession);
+    setQuerySessions((currentSessions) => [
+      updatedSession,
+      ...currentSessions.filter((session) => session.id !== updatedSession.id),
+    ]);
+  };
+
   const updateSqlDraft = async (sqlDraft: string) => {
     if (!currentQuerySession) {
       return;
@@ -268,11 +288,95 @@ export function App({
       currentQuerySession.id,
       sqlDraft,
     );
-    setCurrentQuerySession(savedSession);
+    updateCurrentQuerySession(savedSession);
+  };
+
+  const saveCandidateTables = async (candidateTables: CandidateTable[]) => {
+    if (!currentQuerySession) {
+      return;
+    }
+
+    const optimisticSession = { ...currentQuerySession, candidateTables };
+    setCurrentQuerySession(optimisticSession);
     setQuerySessions((currentSessions) =>
       currentSessions.map((session) =>
-        session.id === savedSession.id ? savedSession : session,
+        session.id === optimisticSession.id ? optimisticSession : session,
       ),
+    );
+
+    const savedSession = await localPersistence.querySessions.saveCandidateTables(
+      currentQuerySession.id,
+      candidateTables,
+    );
+    updateCurrentQuerySession(savedSession);
+  };
+
+  const runCandidateTableDiscovery = async () => {
+    if (!currentQuerySession || !activeCatalog) {
+      setCandidateTableStatus("Open a catalog and create a Query Session first");
+      return;
+    }
+
+    const trimmedQueryNeed = queryNeed.trim();
+    if (!trimmedQueryNeed) {
+      setCandidateTableStatus("Query need is required");
+      return;
+    }
+
+    const configuration: GlobalAiConfiguration = {
+      baseUrl: aiConfigurationForm.baseUrl.trim(),
+      model: aiConfigurationForm.model.trim(),
+      temperature: Number(aiConfigurationForm.temperature),
+      maxTokens: Number(aiConfigurationForm.maxTokens),
+    };
+    const apiKey =
+      aiConfigurationForm.apiKey ||
+      (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID));
+
+    if (!configuration.baseUrl || !configuration.model || !apiKey) {
+      setCandidateTableStatus("AI configuration and API key are required");
+      return;
+    }
+
+    setCandidateTableStatus("Discovering candidate tables");
+    try {
+      const candidateTables = await candidateTableDiscoverer({
+        queryNeed: trimmedQueryNeed,
+        session: currentQuerySession,
+        catalog: activeCatalog,
+        configuration,
+        apiKey,
+      });
+      await saveCandidateTables(candidateTables);
+      setCandidateTableStatus(
+        `${candidateTables.length} candidate table${
+          candidateTables.length === 1 ? "" : "s"
+        } discovered`,
+      );
+    } catch (error) {
+      setCandidateTableStatus(formatCandidateTableError(error));
+    }
+  };
+
+  const addCandidateTable = async () => {
+    if (!selectedCandidateTableName || !currentQuerySession) {
+      return;
+    }
+
+    await saveCandidateTables([
+      ...currentQuerySession.candidateTables,
+      { name: selectedCandidateTableName, reason: "Added by user" },
+    ]);
+    setSelectedCandidateTableName("");
+  };
+
+  const removeCandidateTable = async (tableName: string) => {
+    if (!currentQuerySession) {
+      return;
+    }
+
+    await saveCandidateTables(
+      currentQuerySession.candidateTables.filter((table) => table.name !== tableName),
     );
   };
 
@@ -507,6 +611,26 @@ export function App({
       <aside className="sidebar sidebar-right" aria-label="AI assistant and context">
         <section aria-label="AI assistant" className="panel">
           <div className="panel-title">AI Assistant</div>
+          <label className="field">
+            <span>Query need</span>
+            <textarea
+              className="query-need-input"
+              value={queryNeed}
+              onChange={(event) => setQueryNeed(event.target.value)}
+              placeholder="Find monthly revenue by customer segment"
+            />
+          </label>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={runCandidateTableDiscovery}
+            disabled={!currentQuerySession || !activeCatalog}
+          >
+            Discover candidate tables
+          </button>
+          {candidateTableStatus ? (
+            <div className="status-line">{candidateTableStatus}</div>
+          ) : null}
           <div className="empty-state">
             <strong>Configure global AI provider</strong>
             <p>Add an OpenAI-compatible provider before generating SQL.</p>
@@ -644,9 +768,59 @@ export function App({
           </section>
         </section>
 
-        <section className="panel">
+        <section aria-label="Candidate Table Set" className="panel">
           <div className="panel-title">Candidate Table Set</div>
-          <div className="placeholder-row">No candidate tables yet</div>
+          {currentQuerySession?.candidateTables.length ? (
+            <div className="candidate-table-list">
+              {currentQuerySession.candidateTables.map((table) => (
+                <article className="candidate-table-row" key={table.name}>
+                  <div>
+                    <strong>{table.name}</strong>
+                    {table.reason ? <span>{table.reason}</span> : null}
+                  </div>
+                  <button type="button" onClick={() => removeCandidateTable(table.name)}>
+                    Remove {table.name}
+                  </button>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="placeholder-row">No candidate tables yet</div>
+          )}
+          <div className="candidate-table-controls">
+            <label className="field">
+              <span>Add candidate table</span>
+              <select
+                value={selectedCandidateTableName}
+                onChange={(event) => setSelectedCandidateTableName(event.target.value)}
+                disabled={!activeCatalog || !currentQuerySession}
+              >
+                <option value="">Select table</option>
+                {activeCatalog && currentQuerySession
+                  ? activeCatalog.tables
+                      .filter(
+                        (table) =>
+                          !currentQuerySession.candidateTables.some(
+                            (candidateTable) => candidateTable.name === table.name,
+                          ),
+                      )
+                      .map((table) => (
+                        <option value={table.name} key={table.name}>
+                          {table.name}
+                        </option>
+                      ))
+                  : null}
+              </select>
+            </label>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={addCandidateTable}
+              disabled={!selectedCandidateTableName}
+            >
+              Add candidate table
+            </button>
+          </div>
         </section>
       </aside>
     </main>
@@ -658,4 +832,9 @@ function formatCatalogError(error: unknown) {
   return message.toLowerCase().includes("permission")
     ? `Metadata Permission Failure: ${message}`
     : `Catalog read failed: ${message}`;
+}
+
+function formatCandidateTableError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return `Candidate table discovery failed: ${message}`;
 }

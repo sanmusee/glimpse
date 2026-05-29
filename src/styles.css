@@ -141,13 +141,21 @@ body {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   width: 100%;
   border: 1px solid var(--panel-border);
   border-radius: 7px;
   background: var(--control-bg);
   color: var(--text);
   padding: 8px 10px;
+}
+
+.field textarea {
+  min-height: 82px;
+  resize: vertical;
+  line-height: 1.45;
+  font: inherit;
 }
 
 .connection-form,
@@ -379,4 +387,36 @@ button:disabled {
   margin: 0;
   padding: 10px;
   white-space: pre-wrap;
+}
+
+.candidate-table-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px;
+}
+
+.candidate-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.candidate-table-row strong,
+.candidate-table-row span {
+  display: block;
+}
+
+.candidate-table-row span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.candidate-table-controls {
+  border-top: 1px solid var(--divider);
+  padding: 2px 0 12px;
 }

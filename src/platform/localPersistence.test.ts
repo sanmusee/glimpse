@@ -271,6 +271,7 @@ describe("local persistence boundary", () => {
       sqlDraft: "select 1",
       aiConversationHistory: [],
       executionResultMetadata: [],
+      candidateTables: [],
       createdAt: "2026-05-29T00:00:00.000Z",
       updatedAt: "2026-05-29T00:00:00.000Z",
     };
@@ -308,6 +309,9 @@ describe("local persistence boundary", () => {
         createdAt: "2026-05-29T00:01:00.000Z",
       },
     ]);
+    await localPersistence.querySessions.saveCandidateTables("session-1", [
+      { name: "orders", reason: "Contains order facts" },
+    ]);
     await localPersistence.querySessions.saveExecutionResultMetadata("session-1", [
       {
         id: "execution-1",
@@ -343,6 +347,13 @@ describe("local persistence boundary", () => {
               createdAt: "2026-05-29T00:01:00.000Z",
             },
           ],
+        },
+      },
+      {
+        command: "save_query_session_candidate_tables",
+        args: {
+          sessionId: "session-1",
+          candidateTables: [{ name: "orders", reason: "Contains order facts" }],
         },
       },
       {
