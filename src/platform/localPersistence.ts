@@ -60,11 +60,55 @@ export interface DatabaseConnectionStore {
   testDatabaseConnection(input: DatabaseConnectionInput): Promise<DatabaseConnectionTestResult>;
 }
 
+export interface QuerySession {
+  id: string;
+  databaseConnectionId: string;
+  connectionName: string;
+  defaultDatabase: string;
+  sqlDraft: string;
+  aiConversationHistory: AiConversationEntry[];
+  executionResultMetadata: ExecutionResultMetadata[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiConversationEntry {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+}
+
+export interface ExecutionResultMetadata {
+  id: string;
+  sql: string;
+  rowCount: number;
+  columns: string[];
+  executedAt: string;
+  errorMessage?: string;
+}
+
+export interface QuerySessionStore {
+  listQuerySessions(): Promise<QuerySession[]>;
+  createQuerySession(input: { databaseConnectionId: string }): Promise<QuerySession>;
+  getRestoredQuerySession(): Promise<QuerySession | null>;
+  saveSqlDraft(sessionId: string, sqlDraft: string): Promise<QuerySession>;
+  saveAiConversationHistory(
+    sessionId: string,
+    entries: AiConversationEntry[],
+  ): Promise<QuerySession>;
+  saveExecutionResultMetadata(
+    sessionId: string,
+    metadata: ExecutionResultMetadata[],
+  ): Promise<QuerySession>;
+}
+
 export interface LocalPersistence {
   preferences: PreferenceStore;
   aiConfiguration: AiConfigurationStore;
   secrets: SecretStore;
   databaseConnections: DatabaseConnectionStore;
+  querySessions: QuerySessionStore;
 }
 
 export function isThemePreference(value: unknown): value is ThemePreference {
@@ -85,6 +129,8 @@ export function createInMemoryLocalPersistence(initial?: {
   const databaseConnections = new Map<string, DatabaseConnection>(
     initial?.databaseConnections?.map((connection) => [connection.id, connection]) ?? [],
   );
+  const querySessions = new Map<string, QuerySession>();
+  let currentQuerySessionId: string | null = null;
 
   return {
     preferences: {
@@ -153,6 +199,99 @@ export function createInMemoryLocalPersistence(initial?: {
         }
 
         return { ok: true, message: "Connection test succeeded" };
+      },
+    },
+    querySessions: {
+      async listQuerySessions() {
+        return Array.from(querySessions.values()).sort((left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt),
+        );
+      },
+      async createQuerySession(input) {
+        const databaseConnection = databaseConnections.get(input.databaseConnectionId);
+
+        if (!databaseConnection) {
+          throw new Error("Database connection was not found");
+        }
+
+        const now = new Date().toISOString();
+        const session: QuerySession = {
+          id: createLocalId(),
+          databaseConnectionId: databaseConnection.id,
+          connectionName: databaseConnection.name,
+          defaultDatabase: databaseConnection.defaultDatabase,
+          sqlDraft: "",
+          aiConversationHistory: [],
+          executionResultMetadata: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        querySessions.set(session.id, session);
+        currentQuerySessionId = session.id;
+
+        return session;
+      },
+      async getRestoredQuerySession() {
+        if (currentQuerySessionId && querySessions.has(currentQuerySessionId)) {
+          return querySessions.get(currentQuerySessionId) ?? null;
+        }
+
+        const [mostRecentSession] = await this.listQuerySessions();
+        currentQuerySessionId = mostRecentSession?.id ?? null;
+
+        return mostRecentSession ?? null;
+      },
+      async saveSqlDraft(sessionId, sqlDraft) {
+        const session = querySessions.get(sessionId);
+
+        if (!session) {
+          throw new Error("Query Session was not found");
+        }
+
+        const updatedSession = {
+          ...session,
+          sqlDraft,
+          updatedAt: new Date().toISOString(),
+        };
+        querySessions.set(sessionId, updatedSession);
+        currentQuerySessionId = sessionId;
+
+        return updatedSession;
+      },
+      async saveAiConversationHistory(sessionId, entries) {
+        const session = querySessions.get(sessionId);
+
+        if (!session) {
+          throw new Error("Query Session was not found");
+        }
+
+        const updatedSession = {
+          ...session,
+          aiConversationHistory: entries,
+          updatedAt: new Date().toISOString(),
+        };
+        querySessions.set(sessionId, updatedSession);
+        currentQuerySessionId = sessionId;
+
+        return updatedSession;
+      },
+      async saveExecutionResultMetadata(sessionId, metadata) {
+        const session = querySessions.get(sessionId);
+
+        if (!session) {
+          throw new Error("Query Session was not found");
+        }
+
+        const updatedSession = {
+          ...session,
+          executionResultMetadata: metadata.map(stripResultRowsFromExecutionMetadata),
+          updatedAt: new Date().toISOString(),
+        };
+        querySessions.set(sessionId, updatedSession);
+        currentQuerySessionId = sessionId;
+
+        return updatedSession;
       },
     },
   };
@@ -228,6 +367,41 @@ export function createTauriLocalPersistence(invoke: TauriInvoke = tauriInvoke): 
           : { ok: false, message: "Connection test returned an invalid response" };
       },
     },
+    querySessions: {
+      async listQuerySessions() {
+        const sessions = await invoke("list_query_sessions");
+        return Array.isArray(sessions) ? (sessions as QuerySession[]) : [];
+      },
+      async createQuerySession(input) {
+        const session = await invoke("create_query_session", { input });
+        return session as QuerySession;
+      },
+      async getRestoredQuerySession() {
+        const session = await invoke("get_restored_query_session");
+        return session ? (session as QuerySession) : null;
+      },
+      async saveSqlDraft(sessionId, sqlDraft) {
+        const session = await invoke("save_query_session_sql_draft", {
+          sessionId,
+          sqlDraft,
+        });
+        return session as QuerySession;
+      },
+      async saveAiConversationHistory(sessionId, entries) {
+        const session = await invoke("save_query_session_ai_conversation_history", {
+          sessionId,
+          entries,
+        });
+        return session as QuerySession;
+      },
+      async saveExecutionResultMetadata(sessionId, metadata) {
+        const session = await invoke("save_query_session_execution_metadata", {
+          sessionId,
+          metadata: metadata.map(stripResultRowsFromExecutionMetadata),
+        });
+        return session as QuerySession;
+      },
+    },
   };
 }
 
@@ -271,4 +445,17 @@ function isDatabaseConnectionTestResult(
 
   const candidate = value as { ok?: unknown; message?: unknown };
   return typeof candidate.ok === "boolean" && typeof candidate.message === "string";
+}
+
+function stripResultRowsFromExecutionMetadata(
+  metadata: ExecutionResultMetadata,
+): ExecutionResultMetadata {
+  return {
+    id: metadata.id,
+    sql: metadata.sql,
+    rowCount: metadata.rowCount,
+    columns: metadata.columns,
+    executedAt: metadata.executedAt,
+    errorMessage: metadata.errorMessage,
+  };
 }

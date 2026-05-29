@@ -1,10 +1,12 @@
 use mysql::prelude::Queryable;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use tauri::Manager;
 
 const THEME_PREFERENCE_KEY: &str = "theme_preference";
+const CURRENT_QUERY_SESSION_KEY: &str = "current_query_session_id";
 const DEFAULT_THEME_PREFERENCE: &str = "system";
 const KEYCHAIN_SERVICE: &str = "Glimpse";
 
@@ -45,6 +47,46 @@ struct GlobalAiConfiguration {
     model: String,
     temperature: f64,
     max_tokens: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuerySessionCreateInput {
+    database_connection_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiConversationEntry {
+    id: String,
+    role: String,
+    content: String,
+    created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionResultMetadata {
+    id: String,
+    sql: String,
+    row_count: i64,
+    columns: Vec<String>,
+    executed_at: String,
+    error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QuerySessionRecord {
+    id: String,
+    database_connection_id: String,
+    connection_name: String,
+    default_database: String,
+    sql_draft: String,
+    ai_conversation_history: Vec<AiConversationEntry>,
+    execution_result_metadata: Vec<ExecutionResultMetadata>,
+    created_at: String,
+    updated_at: String,
 }
 
 fn is_theme_preference(value: &str) -> bool {
@@ -109,6 +151,47 @@ fn open_local_store(app: &tauri::AppHandle) -> Result<Connection, String> {
         )
         .map_err(|error| format!("failed to prepare database connections table: {error}"))?;
 
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS query_sessions (
+                id TEXT PRIMARY KEY,
+                database_connection_id TEXT NOT NULL,
+                default_database TEXT NOT NULL,
+                sql_draft TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .map_err(|error| format!("failed to prepare query sessions table: {error}"))?;
+
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS query_session_ai_conversation_history (
+                session_id TEXT PRIMARY KEY,
+                entries_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .map_err(|error| {
+            format!("failed to prepare query session AI conversation history table: {error}")
+        })?;
+
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS query_session_execution_metadata (
+                session_id TEXT PRIMARY KEY,
+                metadata_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .map_err(|error| {
+            format!("failed to prepare query session execution metadata table: {error}")
+        })?;
+
     Ok(connection)
 }
 
@@ -143,6 +226,87 @@ fn validate_database_connection(connection: &DatabaseConnectionRecord) -> Result
 fn keychain_entry(secret_id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, secret_id)
         .map_err(|error| format!("failed to open Keychain entry: {error}"))
+}
+
+fn parse_json_array<T: DeserializeOwned>(value: String) -> Result<Vec<T>, String> {
+    serde_json::from_str(&value)
+        .map_err(|error| format!("failed to parse query session JSON: {error}"))
+}
+
+fn read_query_session_by_id(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<QuerySessionRecord>, String> {
+    connection
+        .query_row(
+            "SELECT
+                qs.id,
+                qs.database_connection_id,
+                COALESCE(dc.name, 'Deleted connection') AS connection_name,
+                qs.default_database,
+                qs.sql_draft,
+                COALESCE(ai.entries_json, '[]') AS ai_conversation_history,
+                COALESCE(metadata.metadata_json, '[]') AS execution_result_metadata,
+                qs.created_at,
+                qs.updated_at
+             FROM query_sessions qs
+             LEFT JOIN database_connections dc ON dc.id = qs.database_connection_id
+             LEFT JOIN query_session_ai_conversation_history ai ON ai.session_id = qs.id
+             LEFT JOIN query_session_execution_metadata metadata ON metadata.session_id = qs.id
+             WHERE qs.id = ?1",
+            [session_id],
+            |row| {
+                Ok(QuerySessionRecord {
+                    id: row.get(0)?,
+                    database_connection_id: row.get(1)?,
+                    connection_name: row.get(2)?,
+                    default_database: row.get(3)?,
+                    sql_draft: row.get(4)?,
+                    ai_conversation_history: parse_json_array(row.get(5)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            error.into(),
+                        )
+                    })?,
+                    execution_result_metadata: parse_json_array(row.get(6)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            error.into(),
+                        )
+                    })?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("failed to read query session: {error}"))
+}
+
+fn set_current_query_session(connection: &Connection, session_id: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO app_settings (key, value, updated_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP",
+            params![CURRENT_QUERY_SESSION_KEY, session_id],
+        )
+        .map_err(|error| format!("failed to save current query session: {error}"))?;
+
+    connection
+        .execute(
+            "UPDATE query_sessions
+             SET last_opened_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+            [session_id],
+        )
+        .map_err(|error| format!("failed to touch current query session: {error}"))?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -417,6 +581,222 @@ fn test_database_connection(
     }
 }
 
+#[tauri::command]
+fn list_query_sessions(app: tauri::AppHandle) -> Result<Vec<QuerySessionRecord>, String> {
+    let connection = open_local_store(&app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT
+                qs.id,
+                qs.database_connection_id,
+                COALESCE(dc.name, 'Deleted connection') AS connection_name,
+                qs.default_database,
+                qs.sql_draft,
+                COALESCE(ai.entries_json, '[]') AS ai_conversation_history,
+                COALESCE(metadata.metadata_json, '[]') AS execution_result_metadata,
+                qs.created_at,
+                qs.updated_at
+             FROM query_sessions qs
+             LEFT JOIN database_connections dc ON dc.id = qs.database_connection_id
+             LEFT JOIN query_session_ai_conversation_history ai ON ai.session_id = qs.id
+             LEFT JOIN query_session_execution_metadata metadata ON metadata.session_id = qs.id
+             ORDER BY qs.last_opened_at DESC, qs.updated_at DESC",
+        )
+        .map_err(|error| format!("failed to prepare query session list: {error}"))?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(QuerySessionRecord {
+                id: row.get(0)?,
+                database_connection_id: row.get(1)?,
+                connection_name: row.get(2)?,
+                default_database: row.get(3)?,
+                sql_draft: row.get(4)?,
+                ai_conversation_history: parse_json_array(row.get(5)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?,
+                execution_result_metadata: parse_json_array(row.get(6)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| format!("failed to read query sessions: {error}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to parse query sessions: {error}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn create_query_session(
+    app: tauri::AppHandle,
+    input: QuerySessionCreateInput,
+) -> Result<QuerySessionRecord, String> {
+    let connection = open_local_store(&app)?;
+    let default_database = connection
+        .query_row(
+            "SELECT default_database
+             FROM database_connections
+             WHERE id = ?1",
+            [&input.database_connection_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("failed to read database connection for query session: {error}"))?
+        .ok_or_else(|| "database connection was not found".to_string())?;
+    let session_id = format!("query-session-{}", uuid_like_id());
+
+    connection
+        .execute(
+            "INSERT INTO query_sessions (
+                id, database_connection_id, default_database, sql_draft,
+                created_at, updated_at, last_opened_at
+             )
+             VALUES (?1, ?2, ?3, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            params![session_id, input.database_connection_id, default_database],
+        )
+        .map_err(|error| format!("failed to create query session: {error}"))?;
+
+    set_current_query_session(&connection, &session_id)?;
+    read_query_session_by_id(&connection, &session_id)?
+        .ok_or_else(|| "created query session was not found".to_string())
+}
+
+#[tauri::command]
+fn get_restored_query_session(app: tauri::AppHandle) -> Result<Option<QuerySessionRecord>, String> {
+    let connection = open_local_store(&app)?;
+    let current_session_id = connection
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [CURRENT_QUERY_SESSION_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("failed to read current query session: {error}"))?;
+
+    if let Some(session_id) = current_session_id {
+        if let Some(session) = read_query_session_by_id(&connection, &session_id)? {
+            set_current_query_session(&connection, &session.id)?;
+            return Ok(Some(session));
+        }
+    }
+
+    let session_id = connection
+        .query_row(
+            "SELECT id
+             FROM query_sessions
+             ORDER BY last_opened_at DESC, updated_at DESC
+             LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("failed to read most recent query session: {error}"))?;
+
+    match session_id {
+        Some(session_id) => {
+            set_current_query_session(&connection, &session_id)?;
+            read_query_session_by_id(&connection, &session_id)
+        }
+        None => Ok(None),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn save_query_session_sql_draft(
+    app: tauri::AppHandle,
+    session_id: String,
+    sql_draft: String,
+) -> Result<QuerySessionRecord, String> {
+    let connection = open_local_store(&app)?;
+    connection
+        .execute(
+            "UPDATE query_sessions
+             SET sql_draft = ?1, updated_at = CURRENT_TIMESTAMP, last_opened_at = CURRENT_TIMESTAMP
+             WHERE id = ?2",
+            params![sql_draft, session_id],
+        )
+        .map_err(|error| format!("failed to save SQL draft: {error}"))?;
+
+    set_current_query_session(&connection, &session_id)?;
+    read_query_session_by_id(&connection, &session_id)?
+        .ok_or_else(|| "query session was not found".to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn save_query_session_ai_conversation_history(
+    app: tauri::AppHandle,
+    session_id: String,
+    entries: Vec<AiConversationEntry>,
+) -> Result<QuerySessionRecord, String> {
+    let connection = open_local_store(&app)?;
+    let entries_json = serde_json::to_string(&entries)
+        .map_err(|error| format!("failed to serialize AI conversation history: {error}"))?;
+
+    connection
+        .execute(
+            "INSERT INTO query_session_ai_conversation_history
+                (session_id, entries_json, updated_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(session_id) DO UPDATE SET
+                entries_json = excluded.entries_json,
+                updated_at = CURRENT_TIMESTAMP",
+            params![session_id, entries_json],
+        )
+        .map_err(|error| format!("failed to save AI conversation history: {error}"))?;
+
+    set_current_query_session(&connection, &session_id)?;
+    read_query_session_by_id(&connection, &session_id)?
+        .ok_or_else(|| "query session was not found".to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn save_query_session_execution_metadata(
+    app: tauri::AppHandle,
+    session_id: String,
+    metadata: Vec<ExecutionResultMetadata>,
+) -> Result<QuerySessionRecord, String> {
+    let connection = open_local_store(&app)?;
+    let metadata_json = serde_json::to_string(&metadata)
+        .map_err(|error| format!("failed to serialize execution metadata: {error}"))?;
+
+    connection
+        .execute(
+            "INSERT INTO query_session_execution_metadata
+                (session_id, metadata_json, updated_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(session_id) DO UPDATE SET
+                metadata_json = excluded.metadata_json,
+                updated_at = CURRENT_TIMESTAMP",
+            params![session_id, metadata_json],
+        )
+        .map_err(|error| format!("failed to save execution metadata: {error}"))?;
+
+    set_current_query_session(&connection, &session_id)?;
+    read_query_session_by_id(&connection, &session_id)?
+        .ok_or_else(|| "query session was not found".to_string())
+}
+
+fn uuid_like_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+
+    format!("{timestamp:x}")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -431,7 +811,13 @@ pub fn run() {
             list_database_connections,
             save_database_connection,
             delete_database_connection,
-            test_database_connection
+            test_database_connection,
+            list_query_sessions,
+            create_query_session,
+            get_restored_query_session,
+            save_query_session_sql_draft,
+            save_query_session_ai_conversation_history,
+            save_query_session_execution_metadata
         ])
         .run(tauri::generate_context!())
         .expect("error while running Glimpse");
