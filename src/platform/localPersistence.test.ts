@@ -40,4 +40,96 @@ describe("local persistence boundary", () => {
       { command: "delete_secret", args: { secretId: "database-password" } },
     ]);
   });
+
+  it("routes database connection metadata through SQLite commands and passwords through Keychain", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const localPersistence = createTauriLocalPersistence(async (command, args) => {
+      calls.push({ command, args });
+
+      if (command === "list_database_connections") {
+        return [
+          {
+            id: "db-1",
+            name: "Warehouse",
+            host: "warehouse.internal",
+            port: 3306,
+            username: "readonly",
+            passwordSecretId: "database-connection:db-1:password",
+            defaultDatabase: "warehouse",
+          },
+        ];
+      }
+
+      if (command === "test_database_connection") {
+        return { ok: true, message: "Connected" };
+      }
+
+      return null;
+    });
+
+    await expect(localPersistence.databaseConnections.listDatabaseConnections()).resolves.toEqual([
+      expect.objectContaining({ id: "db-1", name: "Warehouse" }),
+    ]);
+    await localPersistence.databaseConnections.saveDatabaseConnection({
+      id: "db-2",
+      name: "Analytics",
+      host: "analytics.internal",
+      port: 4000,
+      username: "analyst",
+      password: "not-in-sqlite",
+      defaultDatabase: "analytics",
+    });
+    await expect(
+      localPersistence.databaseConnections.testDatabaseConnection({
+        id: "db-2",
+        name: "Analytics",
+        host: "analytics.internal",
+        port: 4000,
+        username: "analyst",
+        password: "not-in-sqlite",
+        defaultDatabase: "analytics",
+      }),
+    ).resolves.toEqual({ ok: true, message: "Connected" });
+    await localPersistence.databaseConnections.deleteDatabaseConnection("db-2");
+
+    expect(calls).toEqual([
+      { command: "list_database_connections", args: undefined },
+      {
+        command: "save_database_connection",
+        args: {
+          connection: {
+            id: "db-2",
+            name: "Analytics",
+            host: "analytics.internal",
+            port: 4000,
+            username: "analyst",
+            passwordSecretId: "database-connection:db-2:password",
+            defaultDatabase: "analytics",
+          },
+        },
+      },
+      {
+        command: "set_secret",
+        args: {
+          secretId: "database-connection:db-2:password",
+          secretValue: "not-in-sqlite",
+        },
+      },
+      {
+        command: "test_database_connection",
+        args: {
+          input: {
+            id: "db-2",
+            name: "Analytics",
+            host: "analytics.internal",
+            port: 4000,
+            username: "analyst",
+            password: "not-in-sqlite",
+            defaultDatabase: "analytics",
+          },
+        },
+      },
+      { command: "delete_database_connection", args: { id: "db-2" } },
+    ]);
+  });
 });

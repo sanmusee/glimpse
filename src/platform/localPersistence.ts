@@ -14,9 +14,42 @@ export interface SecretStore {
   deleteSecret(secretId: string): Promise<void>;
 }
 
+export interface DatabaseConnection {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  passwordSecretId: string;
+  defaultDatabase: string;
+}
+
+export interface DatabaseConnectionInput {
+  id?: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  passwordSecretId?: string;
+  password?: string;
+  defaultDatabase: string;
+}
+
+export type DatabaseConnectionTestResult =
+  | { ok: true; message: string }
+  | { ok: false; message: string };
+
+export interface DatabaseConnectionStore {
+  listDatabaseConnections(): Promise<DatabaseConnection[]>;
+  saveDatabaseConnection(input: DatabaseConnectionInput): Promise<DatabaseConnection>;
+  deleteDatabaseConnection(id: string): Promise<void>;
+  testDatabaseConnection(input: DatabaseConnectionInput): Promise<DatabaseConnectionTestResult>;
+}
+
 export interface LocalPersistence {
   preferences: PreferenceStore;
   secrets: SecretStore;
+  databaseConnections: DatabaseConnectionStore;
 }
 
 export function isThemePreference(value: unknown): value is ThemePreference {
@@ -25,9 +58,16 @@ export function isThemePreference(value: unknown): value is ThemePreference {
 
 export function createInMemoryLocalPersistence(initial?: {
   themePreference?: ThemePreference;
+  databaseConnections?: DatabaseConnection[];
+  testDatabaseConnection?: (
+    input: DatabaseConnectionInput,
+  ) => Promise<DatabaseConnectionTestResult> | DatabaseConnectionTestResult;
 }): LocalPersistence {
   let themePreference = initial?.themePreference ?? "system";
   const secrets = new Map<string, string>();
+  const databaseConnections = new Map<string, DatabaseConnection>(
+    initial?.databaseConnections?.map((connection) => [connection.id, connection]) ?? [],
+  );
 
   return {
     preferences: {
@@ -47,6 +87,47 @@ export function createInMemoryLocalPersistence(initial?: {
       },
       async deleteSecret(secretId) {
         secrets.delete(secretId);
+      },
+    },
+    databaseConnections: {
+      async listDatabaseConnections() {
+        return Array.from(databaseConnections.values());
+      },
+      async saveDatabaseConnection(input) {
+        const id = input.id ?? createLocalId();
+        const passwordSecretId = input.passwordSecretId ?? `database-connection:${id}:password`;
+        const savedConnection: DatabaseConnection = {
+          id,
+          name: input.name,
+          host: input.host,
+          port: input.port,
+          username: input.username,
+          passwordSecretId,
+          defaultDatabase: input.defaultDatabase,
+        };
+
+        databaseConnections.set(id, savedConnection);
+
+        if (input.password) {
+          secrets.set(passwordSecretId, input.password);
+        }
+
+        return savedConnection;
+      },
+      async deleteDatabaseConnection(id) {
+        const existingConnection = databaseConnections.get(id);
+        databaseConnections.delete(id);
+
+        if (existingConnection) {
+          secrets.delete(existingConnection.passwordSecretId);
+        }
+      },
+      async testDatabaseConnection(input) {
+        if (initial?.testDatabaseConnection) {
+          return initial.testDatabaseConnection(input);
+        }
+
+        return { ok: true, message: "Connection test succeeded" };
       },
     },
   };
@@ -77,6 +158,42 @@ export function createTauriLocalPersistence(invoke: TauriInvoke = tauriInvoke): 
         await invoke("delete_secret", { secretId });
       },
     },
+    databaseConnections: {
+      async listDatabaseConnections() {
+        const connections = await invoke("list_database_connections");
+        return Array.isArray(connections) ? (connections as DatabaseConnection[]) : [];
+      },
+      async saveDatabaseConnection(input) {
+        const id = input.id ?? createLocalId();
+        const passwordSecretId = input.passwordSecretId ?? `database-connection:${id}:password`;
+        const connection = {
+          id,
+          name: input.name,
+          host: input.host,
+          port: input.port,
+          username: input.username,
+          passwordSecretId,
+          defaultDatabase: input.defaultDatabase,
+        };
+
+        await invoke("save_database_connection", { connection });
+
+        if (input.password) {
+          await invoke("set_secret", { secretId: passwordSecretId, secretValue: input.password });
+        }
+
+        return connection;
+      },
+      async deleteDatabaseConnection(id) {
+        await invoke("delete_database_connection", { id });
+      },
+      async testDatabaseConnection(input) {
+        const result = await invoke("test_database_connection", { input });
+        return isDatabaseConnectionTestResult(result)
+          ? result
+          : { ok: false, message: "Connection test returned an invalid response" };
+      },
+    },
   };
 }
 
@@ -88,3 +205,22 @@ export function createDefaultLocalPersistence(): LocalPersistence {
 }
 
 export const defaultLocalPersistence = createDefaultLocalPersistence();
+
+function createLocalId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function isDatabaseConnectionTestResult(
+  value: unknown,
+): value is DatabaseConnectionTestResult {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as { ok?: unknown; message?: unknown };
+  return typeof candidate.ok === "boolean" && typeof candidate.message === "string";
+}
