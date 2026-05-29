@@ -1,29 +1,67 @@
 import "./styles.css";
 import { useEffect, useRef, useState } from "react";
 import {
+  runStreamingAiProviderTest,
+  type AiProviderTestResult,
+} from "./aiProviderTestClient";
+import {
+  AI_PROVIDER_API_KEY_SECRET_ID,
+  defaultLocalPersistence,
   type DatabaseConnection,
   type DatabaseConnectionInput,
-  defaultLocalPersistence,
+  type GlobalAiConfiguration,
   type LocalPersistence,
   type ThemePreference,
 } from "./platform/localPersistence";
 
 interface AppProps {
   localPersistence?: LocalPersistence;
+  aiProviderTester?: (
+    configuration: GlobalAiConfiguration,
+    apiKey: string,
+  ) => Promise<AiProviderTestResult>;
 }
 
-export function App({ localPersistence = defaultLocalPersistence }: AppProps) {
+interface AiConfigurationFormState {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  temperature: string;
+  maxTokens: string;
+}
+
+const emptyAiConfigurationForm: AiConfigurationFormState = {
+  baseUrl: "",
+  apiKey: "",
+  model: "",
+  temperature: "0.2",
+  maxTokens: "1000",
+};
+
+const emptyDatabaseConnectionForm: DatabaseConnectionInput = {
+  name: "",
+  host: "",
+  port: 4000,
+  username: "",
+  password: "",
+  defaultDatabase: "",
+};
+
+export function App({
+  localPersistence = defaultLocalPersistence,
+  aiProviderTester = runStreamingAiProviderTest,
+}: AppProps) {
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [databaseConnections, setDatabaseConnections] = useState<DatabaseConnection[]>([]);
-  const [databaseConnectionForm, setDatabaseConnectionForm] = useState<DatabaseConnectionInput>({
-    name: "",
-    host: "",
-    port: 4000,
-    username: "",
-    password: "",
-    defaultDatabase: "",
-  });
+  const [databaseConnectionForm, setDatabaseConnectionForm] =
+    useState<DatabaseConnectionInput>(emptyDatabaseConnectionForm);
   const [connectionTestMessage, setConnectionTestMessage] = useState<string | null>(null);
+  const [aiConfigurationForm, setAiConfigurationForm] = useState<AiConfigurationFormState>(
+    emptyAiConfigurationForm,
+  );
+  const [aiConfigurationStatus, setAiConfigurationStatus] = useState("Not configured");
+  const [aiProviderTestStatus, setAiProviderTestStatus] = useState("");
+  const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
   const userSelectedThemePreference = useRef(false);
 
   useEffect(() => {
@@ -57,6 +95,36 @@ export function App({ localPersistence = defaultLocalPersistence }: AppProps) {
     };
   }, [localPersistence]);
 
+  useEffect(() => {
+    let isCurrent = true;
+
+    Promise.all([
+      localPersistence.aiConfiguration.getGlobalAiConfiguration(),
+      localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID),
+    ]).then(([storedConfiguration, storedApiKey]) => {
+      if (!isCurrent) {
+        return;
+      }
+
+      if (storedConfiguration) {
+        setAiConfigurationForm({
+          baseUrl: storedConfiguration.baseUrl,
+          apiKey: "",
+          model: storedConfiguration.model,
+          temperature: String(storedConfiguration.temperature),
+          maxTokens: String(storedConfiguration.maxTokens),
+        });
+        setAiConfigurationStatus("AI configuration loaded");
+      }
+
+      setHasSavedApiKey(Boolean(storedApiKey));
+    });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [localPersistence]);
+
   const updateThemePreference = (nextThemePreference: ThemePreference) => {
     userSelectedThemePreference.current = true;
     setThemePreference(nextThemePreference);
@@ -82,14 +150,7 @@ export function App({ localPersistence = defaultLocalPersistence }: AppProps) {
       savedConnection,
       ...currentConnections.filter((connection) => connection.id !== savedConnection.id),
     ]);
-    setDatabaseConnectionForm({
-      name: "",
-      host: "",
-      port: 4000,
-      username: "",
-      password: "",
-      defaultDatabase: "",
-    });
+    setDatabaseConnectionForm(emptyDatabaseConnectionForm);
   };
 
   const testDatabaseConnection = async () => {
@@ -115,6 +176,62 @@ export function App({ localPersistence = defaultLocalPersistence }: AppProps) {
     await localPersistence.databaseConnections.deleteDatabaseConnection(connection.id);
     setDatabaseConnections((currentConnections) =>
       currentConnections.filter((currentConnection) => currentConnection.id !== connection.id),
+    );
+  };
+
+  const updateAiConfigurationField = (
+    field: keyof AiConfigurationFormState,
+    value: string,
+  ) => {
+    setAiConfigurationForm((currentForm) => ({
+      ...currentForm,
+      [field]: value,
+    }));
+  };
+
+  const saveAiConfiguration = async () => {
+    const configuration: GlobalAiConfiguration = {
+      baseUrl: aiConfigurationForm.baseUrl.trim(),
+      model: aiConfigurationForm.model.trim(),
+      temperature: Number(aiConfigurationForm.temperature),
+      maxTokens: Number(aiConfigurationForm.maxTokens),
+    };
+
+    await localPersistence.aiConfiguration.saveGlobalAiConfiguration(configuration);
+
+    if (aiConfigurationForm.apiKey.trim()) {
+      await localPersistence.secrets.setSecret(
+        AI_PROVIDER_API_KEY_SECRET_ID,
+        aiConfigurationForm.apiKey,
+      );
+      setHasSavedApiKey(true);
+      setAiConfigurationForm((currentForm) => ({ ...currentForm, apiKey: "" }));
+    }
+
+    setAiConfigurationStatus("AI configuration saved");
+  };
+
+  const testAiProvider = async () => {
+    setAiProviderTestStatus("Testing AI provider");
+
+    const configuration: GlobalAiConfiguration = {
+      baseUrl: aiConfigurationForm.baseUrl.trim(),
+      model: aiConfigurationForm.model.trim(),
+      temperature: Number(aiConfigurationForm.temperature),
+      maxTokens: Number(aiConfigurationForm.maxTokens),
+    };
+    const apiKey =
+      aiConfigurationForm.apiKey ||
+      (await localPersistence.secrets.getSecret(AI_PROVIDER_API_KEY_SECRET_ID));
+
+    if (!apiKey) {
+      setAiProviderTestStatus("AI request failed: API key is missing");
+      return;
+    }
+
+    const result = await aiProviderTester(configuration, apiKey);
+    setAiProviderTestStatus(
+      result.ok ? `Streaming AI response: ${result.content}` : `AI request failed: ${result.error}`,
     );
   };
 
@@ -268,6 +385,74 @@ export function App({ localPersistence = defaultLocalPersistence }: AppProps) {
             <strong>Configure global AI provider</strong>
             <p>Add an OpenAI-compatible provider before generating SQL.</p>
           </div>
+          <form
+            className="ai-config-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              saveAiConfiguration();
+            }}
+          >
+            <label className="field">
+              <span>Base URL</span>
+              <input
+                value={aiConfigurationForm.baseUrl}
+                onChange={(event) => updateAiConfigurationField("baseUrl", event.target.value)}
+                placeholder="https://api.openai.com/v1"
+              />
+            </label>
+            <label className="field">
+              <span>API key</span>
+              <input
+                type="password"
+                value={aiConfigurationForm.apiKey}
+                onChange={(event) => updateAiConfigurationField("apiKey", event.target.value)}
+                placeholder={hasSavedApiKey ? "Stored in Keychain" : "Paste API key"}
+              />
+            </label>
+            <label className="field">
+              <span>Model</span>
+              <input
+                value={aiConfigurationForm.model}
+                onChange={(event) => updateAiConfigurationField("model", event.target.value)}
+                placeholder="gpt-4.1-mini"
+              />
+            </label>
+            <div className="field-grid">
+              <label className="field compact-field">
+                <span>Temperature</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="2"
+                  value={aiConfigurationForm.temperature}
+                  onChange={(event) =>
+                    updateAiConfigurationField("temperature", event.target.value)
+                  }
+                />
+              </label>
+              <label className="field compact-field">
+                <span>Max tokens</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={aiConfigurationForm.maxTokens}
+                  onChange={(event) => updateAiConfigurationField("maxTokens", event.target.value)}
+                />
+              </label>
+            </div>
+            <button className="primary-button" type="submit">
+              Save AI configuration
+            </button>
+            <button className="secondary-button" type="button" onClick={testAiProvider}>
+              Test AI provider
+            </button>
+            <div className="status-line">{aiConfigurationStatus}</div>
+            {aiProviderTestStatus ? (
+              <div className="status-line">{aiProviderTestStatus}</div>
+            ) : null}
+            {hasSavedApiKey ? <div className="status-line">API key saved</div> : null}
+          </form>
         </section>
 
         <section className="panel">

@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { createInMemoryLocalPersistence } from "./platform/localPersistence";
 
@@ -187,5 +187,73 @@ describe("Glimpse app shell", () => {
     expect(screen.queryByText(/ssh tunnel/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/advanced ssl/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/bastion/i)).not.toBeInTheDocument();
+  });
+
+  it("saves and restores the global AI provider configuration", async () => {
+    const localPersistence = createInMemoryLocalPersistence();
+    const { unmount } = render(<App localPersistence={localPersistence} />);
+
+    fireEvent.change(screen.getByLabelText(/base url/i), {
+      target: { value: "https://api.example.test/v1" },
+    });
+    fireEvent.change(screen.getByLabelText(/api key/i), {
+      target: { value: "sk-test-secret" },
+    });
+    fireEvent.change(screen.getByLabelText(/^model$/i), {
+      target: { value: "gpt-4.1-mini" },
+    });
+    fireEvent.change(screen.getByLabelText(/temperature/i), {
+      target: { value: "0.2" },
+    });
+    fireEvent.change(screen.getByLabelText(/max tokens/i), {
+      target: { value: "1200" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save ai configuration/i }));
+
+    await screen.findByText(/ai configuration saved/i);
+    expect(screen.getByText(/api key saved/i)).toBeInTheDocument();
+
+    unmount();
+    render(<App localPersistence={localPersistence} />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/base url/i)).toHaveValue("https://api.example.test/v1"),
+    );
+    expect(screen.getByLabelText(/^model$/i)).toHaveValue("gpt-4.1-mini");
+    expect(screen.getByLabelText(/temperature/i)).toHaveValue(0.2);
+    expect(screen.getByLabelText(/max tokens/i)).toHaveValue(1200);
+    expect(screen.getByText(/api key saved/i)).toBeInTheDocument();
+  });
+
+  it("runs the AI provider test manually and retries only when the user clicks again", async () => {
+    const localPersistence = createInMemoryLocalPersistence();
+    const aiProviderTester = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, error: "invalid api key" })
+      .mockResolvedValueOnce({ ok: true, content: "Streaming AI response" });
+
+    render(<App localPersistence={localPersistence} aiProviderTester={aiProviderTester} />);
+
+    fireEvent.change(screen.getByLabelText(/base url/i), {
+      target: { value: "https://api.example.test/v1" },
+    });
+    fireEvent.change(screen.getByLabelText(/api key/i), {
+      target: { value: "sk-test-secret" },
+    });
+    fireEvent.change(screen.getByLabelText(/^model$/i), {
+      target: { value: "gpt-4.1-mini" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save ai configuration/i }));
+    await screen.findByText(/ai configuration saved/i);
+
+    fireEvent.click(screen.getByRole("button", { name: /test ai provider/i }));
+
+    await screen.findByText(/ai request failed: invalid api key/i);
+    expect(aiProviderTester).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /test ai provider/i }));
+
+    await screen.findByText(/streaming ai response/i);
+    expect(aiProviderTester).toHaveBeenCalledTimes(2);
   });
 });

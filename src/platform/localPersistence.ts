@@ -3,9 +3,23 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 export type ThemePreference = "system" | "light" | "dark";
 type TauriInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
+export const AI_PROVIDER_API_KEY_SECRET_ID = "global-ai-provider-api-key";
+
+export interface GlobalAiConfiguration {
+  baseUrl: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+}
+
 export interface PreferenceStore {
   getThemePreference(): Promise<ThemePreference>;
   setThemePreference(themePreference: ThemePreference): Promise<void>;
+}
+
+export interface AiConfigurationStore {
+  getGlobalAiConfiguration(): Promise<GlobalAiConfiguration | null>;
+  saveGlobalAiConfiguration(configuration: GlobalAiConfiguration): Promise<void>;
 }
 
 export interface SecretStore {
@@ -48,6 +62,7 @@ export interface DatabaseConnectionStore {
 
 export interface LocalPersistence {
   preferences: PreferenceStore;
+  aiConfiguration: AiConfigurationStore;
   secrets: SecretStore;
   databaseConnections: DatabaseConnectionStore;
 }
@@ -58,12 +73,14 @@ export function isThemePreference(value: unknown): value is ThemePreference {
 
 export function createInMemoryLocalPersistence(initial?: {
   themePreference?: ThemePreference;
+  aiConfiguration?: GlobalAiConfiguration | null;
   databaseConnections?: DatabaseConnection[];
   testDatabaseConnection?: (
     input: DatabaseConnectionInput,
   ) => Promise<DatabaseConnectionTestResult> | DatabaseConnectionTestResult;
 }): LocalPersistence {
   let themePreference = initial?.themePreference ?? "system";
+  let aiConfiguration = initial?.aiConfiguration ?? null;
   const secrets = new Map<string, string>();
   const databaseConnections = new Map<string, DatabaseConnection>(
     initial?.databaseConnections?.map((connection) => [connection.id, connection]) ?? [],
@@ -76,6 +93,14 @@ export function createInMemoryLocalPersistence(initial?: {
       },
       async setThemePreference(nextThemePreference) {
         themePreference = nextThemePreference;
+      },
+    },
+    aiConfiguration: {
+      async getGlobalAiConfiguration() {
+        return aiConfiguration;
+      },
+      async saveGlobalAiConfiguration(nextConfiguration) {
+        aiConfiguration = nextConfiguration;
       },
     },
     secrets: {
@@ -146,6 +171,15 @@ export function createTauriLocalPersistence(invoke: TauriInvoke = tauriInvoke): 
         await invoke("set_theme_preference", { themePreference });
       },
     },
+    aiConfiguration: {
+      async getGlobalAiConfiguration() {
+        const configuration = await invoke("get_global_ai_configuration");
+        return isGlobalAiConfiguration(configuration) ? configuration : null;
+      },
+      async saveGlobalAiConfiguration(configuration) {
+        await invoke("save_global_ai_configuration", { configuration });
+      },
+    },
     secrets: {
       async getSecret(secretId) {
         const secretValue = await invoke("get_secret", { secretId });
@@ -212,6 +246,20 @@ function createLocalId() {
   }
 
   return `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function isGlobalAiConfiguration(value: unknown): value is GlobalAiConfiguration {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.baseUrl === "string" &&
+    typeof candidate.model === "string" &&
+    typeof candidate.temperature === "number" &&
+    typeof candidate.maxTokens === "number"
+  );
 }
 
 function isDatabaseConnectionTestResult(

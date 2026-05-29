@@ -41,6 +41,50 @@ describe("local persistence boundary", () => {
     ]);
   });
 
+  it("routes global AI configuration through SQLite commands without the API key", async () => {
+    const calls: Array<{ command: string; args?: unknown }> = [];
+    const localPersistence = createTauriLocalPersistence(async (command, args) => {
+      calls.push({ command, args });
+      return command === "get_global_ai_configuration"
+        ? {
+            baseUrl: "https://api.example.test/v1",
+            model: "gpt-4.1-mini",
+            temperature: 0.2,
+            maxTokens: 1200,
+          }
+        : null;
+    });
+
+    await expect(localPersistence.aiConfiguration.getGlobalAiConfiguration()).resolves.toEqual({
+      baseUrl: "https://api.example.test/v1",
+      model: "gpt-4.1-mini",
+      temperature: 0.2,
+      maxTokens: 1200,
+    });
+    await localPersistence.aiConfiguration.saveGlobalAiConfiguration({
+      baseUrl: "https://api.example.test/v1",
+      model: "gpt-4.1-mini",
+      temperature: 0.2,
+      maxTokens: 1200,
+    });
+
+    expect(JSON.stringify(calls)).not.toContain("sk-test-secret");
+    expect(calls).toEqual([
+      { command: "get_global_ai_configuration", args: undefined },
+      {
+        command: "save_global_ai_configuration",
+        args: {
+          configuration: {
+            baseUrl: "https://api.example.test/v1",
+            model: "gpt-4.1-mini",
+            temperature: 0.2,
+            maxTokens: 1200,
+          },
+        },
+      },
+    ]);
+  });
+
   it("routes database connection metadata through SQLite commands and passwords through Keychain", async () => {
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
     const localPersistence = createTauriLocalPersistence(async (command, args) => {
