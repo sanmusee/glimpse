@@ -109,7 +109,8 @@ export function App({
   const [hasGeneratedSql, setHasGeneratedSql] = useState(false);
   const [selectedCandidateTableName, setSelectedCandidateTableName] = useState("");
   const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
-  const [activeDialog, setActiveDialog] = useState<"preferences" | null>(null);
+  const [selectedDataSourceId, setSelectedDataSourceId] = useState<string | null>(null);
+  const [activeDialog, setActiveDialog] = useState<"dataSources" | "preferences" | null>(null);
   const userSelectedThemePreference = useRef(false);
 
   useEffect(() => {
@@ -213,12 +214,21 @@ export function App({
   const saveDatabaseConnection = async () => {
     const savedConnection =
       await localPersistence.databaseConnections.saveDatabaseConnection(databaseConnectionForm);
+    const refreshedConnections =
+      await localPersistence.databaseConnections.listDatabaseConnections();
 
-    setDatabaseConnections((currentConnections) => [
-      savedConnection,
-      ...currentConnections.filter((connection) => connection.id !== savedConnection.id),
-    ]);
-    setDatabaseConnectionForm(emptyDatabaseConnectionForm);
+    setDatabaseConnections(refreshedConnections);
+    setSelectedDataSourceId(savedConnection.id);
+    setDatabaseConnectionForm({
+      id: savedConnection.id,
+      name: savedConnection.name,
+      host: savedConnection.host,
+      port: savedConnection.port,
+      username: savedConnection.username,
+      passwordSecretId: savedConnection.passwordSecretId,
+      password: "",
+      defaultDatabase: savedConnection.defaultDatabase,
+    });
   };
 
   const testDatabaseConnection = async () => {
@@ -232,6 +242,7 @@ export function App({
   };
 
   const editDatabaseConnection = (connection: DatabaseConnection) => {
+    setSelectedDataSourceId(connection.id);
     setDatabaseConnectionForm({
       id: connection.id,
       name: connection.name,
@@ -242,6 +253,12 @@ export function App({
       password: "",
       defaultDatabase: connection.defaultDatabase,
     });
+  };
+
+  const addDatabaseConnection = () => {
+    setSelectedDataSourceId(null);
+    setDatabaseConnectionForm(emptyDatabaseConnectionForm);
+    setConnectionTestMessage(null);
   };
 
   const deleteDatabaseConnection = async (connection: DatabaseConnection) => {
@@ -869,7 +886,9 @@ export function App({
   return (
     <main aria-label="Glimpse V0.2 workbench" className="app-shell">
       <header className="workbench-toolbar" role="toolbar" aria-label="V0.2 workbench toolbar">
-        <button type="button">Data Source Management</button>
+        <button type="button" onClick={() => setActiveDialog("dataSources")}>
+          Data Source Management
+        </button>
         <button type="button">Model Provider Management</button>
         <button
           type="button"
@@ -897,100 +916,31 @@ export function App({
 
         <section className="panel">
           <div className="panel-title">Database</div>
-          <div className="connection-form" aria-label="Database connection form">
-            <div className="empty-state">
-              <strong>Create database connection</strong>
-              <p>Connect a MySQL/TiDB database to load the default schema catalog.</p>
-            </div>
-            <label className="field">
-              <span>Connection name</span>
-              <input
-                value={databaseConnectionForm.name}
-                onChange={(event) => updateDatabaseConnectionForm("name", event.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span>Host</span>
-              <input
-                value={databaseConnectionForm.host}
-                onChange={(event) => updateDatabaseConnectionForm("host", event.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span>Port</span>
-              <input
-                inputMode="numeric"
-                value={databaseConnectionForm.port}
-                onChange={(event) => updateDatabaseConnectionForm("port", event.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span>Username</span>
-              <input
-                value={databaseConnectionForm.username}
-                onChange={(event) => updateDatabaseConnectionForm("username", event.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span>Password</span>
-              <input
-                type="password"
-                value={databaseConnectionForm.password}
-                onChange={(event) => updateDatabaseConnectionForm("password", event.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span>Default Database/Schema</span>
-              <input
-                value={databaseConnectionForm.defaultDatabase}
-                onChange={(event) =>
-                  updateDatabaseConnectionForm("defaultDatabase", event.target.value)
-                }
-              />
-            </label>
-            <div className="form-actions">
-              <button type="button" onClick={testDatabaseConnection}>
-                Test connection
-              </button>
-              <button className="primary-action" type="button" onClick={saveDatabaseConnection}>
-                Save connection
-              </button>
-            </div>
-            {connectionTestMessage ? (
-              <div className="connection-test-status" role="status">
-                {connectionTestMessage}
-              </div>
-            ) : null}
-            <div className="connection-list" aria-label="Saved database connections">
-              {databaseConnections.length === 0 ? (
-                <div className="placeholder-row">No saved connections yet</div>
-              ) : (
-                databaseConnections.map((connection) => (
-                  <article className="connection-row" key={connection.id}>
-                    <div>
-                      <strong>{connection.name}</strong>
-                      <span>
-                        {connection.host}:{connection.port} / {connection.defaultDatabase}
-                      </span>
-                    </div>
-                    <div className="connection-actions">
-                      <button type="button" onClick={() => editDatabaseConnection(connection)}>
-                        Edit {connection.name}
-                      </button>
-                      <button type="button" onClick={() => openCatalog(connection)}>
-                        Open catalog {connection.name}
-                      </button>
-                      <button type="button" onClick={() => deleteDatabaseConnection(connection)}>
-                        Delete {connection.name}
-                      </button>
-                      <button type="button" onClick={() => createQuerySession(connection)}>
-                        New session for {connection.name}
-                      </button>
-                    </div>
-                  </article>
-                ))
-              )}
-            </div>
+          <div className="connection-tree" role="tree" aria-label="Database Connection Tree">
+            {databaseConnections.length === 0 ? (
+              <div className="placeholder-row">No saved connections yet</div>
+            ) : (
+              databaseConnections.map((connection) => (
+                <article className="connection-tree-row" key={connection.id}>
+                  <div
+                    aria-label={`${connection.name} ${connection.defaultDatabase}`}
+                    className="connection-tree-item"
+                    role="treeitem"
+                  >
+                    <strong>{connection.name}</strong>
+                    <span>{connection.defaultDatabase}</span>
+                  </div>
+                  <div className="connection-tree-actions">
+                    <button type="button" onClick={() => openCatalog(connection)}>
+                      Open catalog {connection.name}
+                    </button>
+                    <button type="button" onClick={() => createQuerySession(connection)}>
+                      New session for {connection.name}
+                    </button>
+                  </div>
+                </article>
+              ))
+            )}
           </div>
         </section>
 
@@ -1389,6 +1339,159 @@ export function App({
           </div>
         </section>
       </section>
+
+      {activeDialog === "dataSources" ? (
+        <div className="dialog-backdrop">
+          <section
+            aria-label="Data Source Management"
+            role="dialog"
+            aria-modal="true"
+            className="dialog data-source-dialog panel"
+          >
+            <div className="panel-title">
+              <span>Data Source Management</span>
+              <button type="button" onClick={() => setActiveDialog(null)}>
+                Close
+              </button>
+            </div>
+            <div className="management-dialog-body">
+              <aside className="management-list-pane">
+                <div className="management-pane-title">Saved data sources</div>
+                <button type="button" className="secondary-button" onClick={addDatabaseConnection}>
+                  Add Database Connection
+                </button>
+                <div className="management-list" role="list" aria-label="Saved data sources">
+                  {databaseConnections.length === 0 ? (
+                    <div className="placeholder-row">No saved connections yet</div>
+                  ) : (
+                    databaseConnections.map((connection) => (
+                      <button
+                        aria-label={`${connection.name} ${connection.defaultDatabase}${
+                          selectedDataSourceId === connection.id ? " selected" : ""
+                        }`}
+                        aria-selected={selectedDataSourceId === connection.id}
+                        className="management-list-item"
+                        key={connection.id}
+                        type="button"
+                        onClick={() => editDatabaseConnection(connection)}
+                      >
+                        <strong>{connection.name}</strong>
+                        <span>
+                          {connection.host}:{connection.port} / {connection.defaultDatabase}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </aside>
+              <form
+                aria-label="Database connection details"
+                className="connection-form management-form-pane"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  saveDatabaseConnection();
+                }}
+              >
+                <div className="empty-state">
+                  <strong>
+                    {databaseConnectionForm.id
+                      ? "Edit database connection"
+                      : "Create database connection"}
+                  </strong>
+                  <p>Connect a MySQL/TiDB database to load the default schema catalog.</p>
+                </div>
+                <label className="field">
+                  <span>Connection name</span>
+                  <input
+                    value={databaseConnectionForm.name}
+                    onChange={(event) =>
+                      updateDatabaseConnectionForm("name", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Host</span>
+                  <input
+                    value={databaseConnectionForm.host}
+                    onChange={(event) =>
+                      updateDatabaseConnectionForm("host", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Port</span>
+                  <input
+                    inputMode="numeric"
+                    value={databaseConnectionForm.port}
+                    onChange={(event) =>
+                      updateDatabaseConnectionForm("port", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Username</span>
+                  <input
+                    value={databaseConnectionForm.username}
+                    onChange={(event) =>
+                      updateDatabaseConnectionForm("username", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Password</span>
+                  <input
+                    type="password"
+                    value={databaseConnectionForm.password}
+                    onChange={(event) =>
+                      updateDatabaseConnectionForm("password", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Default Database/Schema</span>
+                  <input
+                    value={databaseConnectionForm.defaultDatabase}
+                    onChange={(event) =>
+                      updateDatabaseConnectionForm("defaultDatabase", event.target.value)
+                    }
+                  />
+                </label>
+                <div className="form-actions">
+                  <button type="button" onClick={testDatabaseConnection}>
+                    Test connection
+                  </button>
+                  <button className="primary-action" type="submit">
+                    Save connection
+                  </button>
+                  {databaseConnectionForm.id ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const connection = databaseConnections.find(
+                          (currentConnection) =>
+                            currentConnection.id === databaseConnectionForm.id,
+                        );
+
+                        if (connection) {
+                          deleteDatabaseConnection(connection);
+                          addDatabaseConnection();
+                        }
+                      }}
+                    >
+                      Delete {databaseConnectionForm.name}
+                    </button>
+                  ) : null}
+                </div>
+                {connectionTestMessage ? (
+                  <div className="connection-test-status" role="status">
+                    {connectionTestMessage}
+                  </div>
+                ) : null}
+              </form>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {activeDialog === "preferences" ? (
         <div className="dialog-backdrop">

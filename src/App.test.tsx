@@ -124,7 +124,108 @@ describe("Glimpse app shell", () => {
       .toBeInTheDocument();
     expect(screen.getByRole("region", { name: /ai assistant/i })).toBeInTheDocument();
     expect(screen.getByText(/configure global ai provider/i)).toBeInTheDocument();
-    expect(screen.getByText(/create database connection/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /data source management/i })).toBeInTheDocument();
+    expect(screen.getByText(/no saved connections yet/i)).toBeInTheDocument();
+  });
+
+  it("renders saved database connections as first-level Database Connection Tree items", async () => {
+    render(
+      <App
+        localPersistence={createInMemoryLocalPersistence({
+          databaseConnections: [
+            {
+              id: "db-1",
+              name: "Warehouse",
+              host: "warehouse.internal",
+              port: 3306,
+              username: "readonly",
+              passwordSecretId: "database-connection:db-1:password",
+              defaultDatabase: "analytics",
+            },
+            {
+              id: "db-2",
+              name: "Reporting",
+              host: "reporting.internal",
+              port: 4000,
+              username: "analyst",
+              passwordSecretId: "database-connection:db-2:password",
+              defaultDatabase: "mart",
+            },
+          ],
+        })}
+      />,
+    );
+
+    const connectionTree = screen.getByRole("tree", { name: /database connection tree/i });
+
+    expect(await screen.findByRole("treeitem", { name: /warehouse analytics/i }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: /reporting mart/i })).toBeInTheDocument();
+    expect(connectionTree).not.toHaveTextContent("orders");
+    expect(connectionTree).not.toHaveTextContent("customers");
+  });
+
+  it("opens Data Source Management with saved data sources on the left and a create/edit form on the right", async () => {
+    render(
+      <App
+        localPersistence={createInMemoryLocalPersistence({
+          databaseConnections: [
+            {
+              id: "db-1",
+              name: "Warehouse",
+              host: "warehouse.internal",
+              port: 3306,
+              username: "readonly",
+              passwordSecretId: "database-connection:db-1:password",
+              defaultDatabase: "analytics",
+            },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /data source management/i }));
+
+    const dialog = screen.getByRole("dialog", { name: /data source management/i });
+    expect(await screen.findByRole("list", { name: /saved data sources/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /warehouse analytics/i })).toBeInTheDocument();
+    expect(dialog).toContainElement(
+      screen.getByRole("form", { name: /database connection details/i }),
+    );
+    expect(screen.getByLabelText(/connection name/i)).toHaveValue("");
+  });
+
+  it("opens an empty Database Connection form from the add action after editing an existing data source", async () => {
+    render(
+      <App
+        localPersistence={createInMemoryLocalPersistence({
+          databaseConnections: [
+            {
+              id: "db-1",
+              name: "Warehouse",
+              host: "warehouse.internal",
+              port: 3306,
+              username: "readonly",
+              passwordSecretId: "database-connection:db-1:password",
+              defaultDatabase: "analytics",
+            },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /data source management/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /warehouse analytics/i }));
+    expect(screen.getByLabelText(/connection name/i)).toHaveValue("Warehouse");
+
+    fireEvent.click(screen.getByRole("button", { name: /add database connection/i }));
+
+    expect(screen.getByLabelText(/connection name/i)).toHaveValue("");
+    expect(screen.getByLabelText(/^host$/i)).toHaveValue("");
+    expect(screen.getByLabelText(/^port$/i)).toHaveValue("4000");
+    expect(screen.getByLabelText(/^username$/i)).toHaveValue("");
+    expect(screen.getByLabelText(/^password$/i)).toHaveValue("");
+    expect(screen.getByLabelText(/default database/i)).toHaveValue("");
   });
 
   it("does not expose V0.1 out-of-scope entry points", () => {
@@ -189,6 +290,8 @@ describe("Glimpse app shell", () => {
     const localPersistence = createInMemoryLocalPersistence();
     render(<App localPersistence={localPersistence} />);
 
+    fireEvent.click(screen.getByRole("button", { name: /data source management/i }));
+
     fireEvent.change(screen.getByLabelText(/connection name/i), {
       target: { value: "Analytics TiDB" },
     });
@@ -210,8 +313,12 @@ describe("Glimpse app shell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /save connection/i }));
 
-    expect(await screen.findByText("Analytics TiDB")).toBeInTheDocument();
-    expect(screen.getByText("analytics.internal:4000 / warehouse")).toBeInTheDocument();
+    expect(await screen.findByRole("button", {
+      name: /analytics tidb warehouse selected/i,
+    })).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: /analytics tidb warehouse/i }))
+      .toBeInTheDocument();
+    expect(screen.getByLabelText(/connection name/i)).toHaveValue("Analytics TiDB");
 
     const [savedConnection] =
       await localPersistence.databaseConnections.listDatabaseConnections();
@@ -244,15 +351,20 @@ describe("Glimpse app shell", () => {
     });
     render(<App localPersistence={localPersistence} />);
 
-    expect(await screen.findByText("Warehouse")).toBeInTheDocument();
+    expect(await screen.findByRole("treeitem", { name: /warehouse analytics/i }))
+      .toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /data source management/i }));
 
-    fireEvent.click(screen.getByRole("button", { name: /edit warehouse/i }));
+    fireEvent.click(screen.getByRole("button", { name: /warehouse analytics/i }));
+    expect(screen.getByLabelText(/connection name/i)).toHaveValue("Warehouse");
     fireEvent.change(screen.getByLabelText(/default database/i), {
       target: { value: "mart" },
     });
     fireEvent.click(screen.getByRole("button", { name: /save connection/i }));
 
-    expect(await screen.findByText("warehouse.internal:3306 / mart")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /warehouse mart selected/i }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: /warehouse mart/i })).toBeInTheDocument();
     await expect(localPersistence.databaseConnections.listDatabaseConnections()).resolves.toEqual([
       expect.objectContaining({
         id: "db-1",
@@ -262,7 +374,9 @@ describe("Glimpse app shell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /delete warehouse/i }));
 
-    await waitFor(() => expect(screen.queryByText("Warehouse")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /warehouse mart/i })).not.toBeInTheDocument(),
+    );
     await expect(localPersistence.databaseConnections.listDatabaseConnections()).resolves.toEqual(
       [],
     );
@@ -283,6 +397,8 @@ describe("Glimpse app shell", () => {
       },
     });
     render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /data source management/i }));
 
     fireEvent.change(screen.getByLabelText(/connection name/i), {
       target: { value: "Warehouse" },
