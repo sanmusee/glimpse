@@ -1351,6 +1351,58 @@ fn get_restored_query_session(app: tauri::AppHandle) -> Result<Option<QuerySessi
 }
 
 #[tauri::command(rename_all = "camelCase")]
+fn open_query_session(
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<QuerySessionRecord, String> {
+    let connection = open_local_store(&app)?;
+    read_query_session_by_id(&connection, &session_id)?
+        .ok_or_else(|| "query session was not found".to_string())?;
+
+    set_current_query_session(&connection, &session_id)?;
+    read_query_session_by_id(&connection, &session_id)?
+        .ok_or_else(|| "query session was not found".to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn delete_query_session(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
+    let connection = open_local_store(&app)?;
+
+    connection
+        .execute(
+            "DELETE FROM query_session_candidate_tables WHERE session_id = ?1",
+            [&session_id],
+        )
+        .map_err(|error| format!("failed to delete query session candidate tables: {error}"))?;
+    connection
+        .execute(
+            "DELETE FROM query_session_ai_conversation_history WHERE session_id = ?1",
+            [&session_id],
+        )
+        .map_err(|error| {
+            format!("failed to delete query session AI conversation history: {error}")
+        })?;
+    connection
+        .execute(
+            "DELETE FROM query_session_execution_metadata WHERE session_id = ?1",
+            [&session_id],
+        )
+        .map_err(|error| format!("failed to delete query session execution metadata: {error}"))?;
+    connection
+        .execute("DELETE FROM query_sessions WHERE id = ?1", [&session_id])
+        .map_err(|error| format!("failed to delete query session: {error}"))?;
+
+    connection
+        .execute(
+            "DELETE FROM app_settings WHERE key = ?1 AND value = ?2",
+            params![CURRENT_QUERY_SESSION_KEY, session_id],
+        )
+        .map_err(|error| format!("failed to clear deleted current query session: {error}"))?;
+
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn save_query_session_sql_draft(
     app: tauri::AppHandle,
     session_id: String,
@@ -1485,6 +1537,8 @@ pub fn run() {
             list_query_sessions,
             create_query_session,
             get_restored_query_session,
+            open_query_session,
+            delete_query_session,
             save_query_session_sql_draft,
             save_query_session_ai_conversation_history,
             save_query_session_candidate_tables,
