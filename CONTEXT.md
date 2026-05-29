@@ -49,8 +49,12 @@ A saved database connection configuration. V0.1 supports multiple saved Database
 _Avoid_: Cross-connection query, cross-connection session
 
 **Direct Database Connection**:
-The V0.1 connection type for connecting directly to MySQL/TiDB using host, port, username, password, and Default Database/Schema.
-_Avoid_: SSH tunnel, advanced SSL setup, bastion-host workflow in V0.1
+The V0.1 and V0.2 connection type for connecting directly to MySQL/TiDB using host, port, username, password, and Default Database/Schema.
+_Avoid_: SSH tunnel, advanced SSL setup, bastion-host workflow in V0.1/V0.2, PostgreSQL or other database types in V0.2
+
+**Data Source Management Dialog**:
+The V0.2 modal surface for creating and editing Database Connections. It uses a left list of saved data sources and a right form for the selected data source or a new empty data source; using the add action opens an empty form, and saving refreshes the list and selects the saved item.
+_Avoid_: New-only connection dialog, always-visible connection form
 
 **Connection Enhancement**:
 A future capability for connection types and security options beyond Direct Database Connection, such as SSH Tunnel, advanced SSL configuration, or bastion-host workflows.
@@ -84,6 +88,14 @@ _Avoid_: Chat-first layout, BI dashboard-first layout
 The confirmed V0.1 baseline layout derived from UI prototype Variant A: session history and catalog context on the left, SQL editor and results in the center, and AI Assistant Panel, Candidate Table Set, and table details on the right. V0.1 uses fixed default side-panel widths with collapsible left and right panels; it does not support draggable panel resizing.
 _Avoid_: Command-first top-band layout as the V0.1 baseline, timeline-first session layout as the V0.1 baseline, draggable panel resizing in V0.1
 
+**Database Connection Tree**:
+The V0.2 left-side primary navigation structure where saved Database Connections are the first-level items. It may expand into the connection's Default Database/Schema and table list, but V0.2 does not require field-level or index-level browsing in the tree.
+_Avoid_: Query Session-first left navigation, flat saved-connection cards, full database IDE object explorer
+
+**Preferences Dialog**:
+The V0.2 modal surface for user preferences such as Theme Preference and future non-workspace preferences. It keeps global preference controls out of the main Database Connection Tree and SQL workspace.
+_Avoid_: Always-visible preference panel, burying preferences inside database connection setup
+
 **Empty State Setup**:
 The V0.1 onboarding style where the app opens directly into the main SQL Editor-first Layout and uses empty states to guide users to configure Global AI Configuration and their first Database Connection.
 _Avoid_: Separate first-run wizard, marketing-style onboarding
@@ -95,6 +107,14 @@ _Avoid_: Single-theme-only app
 **AI Assistant Panel**:
 The supporting UI area for natural-language requests, SQL generation, SQL Iteration, Auto Table Discovery, and repair interactions.
 _Avoid_: Replacing the SQL editor as the primary workspace
+
+**Non-persistent AI Surface**:
+The V0.2 placement for AI-assisted SQL capabilities when they are available: AI interactions should open from commands, dialogs, drawers, or contextual actions rather than occupying a persistent main workbench panel.
+_Avoid_: Always-visible AI Assistant Panel in the V0.2 main layout, chat-first workspace
+
+**AI Conversation View**:
+The V0.2 right-side switchable view for Cursor-style AI conversation, with conversation history above and an input box below. It is bound to the active SQL Console, so switching consoles switches the visible AI Conversation History.
+_Avoid_: Full-screen chat-first workspace, replacing SQL editor content with chat, global AI conversation mixing unrelated consoles
 
 **Streaming AI Response**:
 The V0.1 behavior where AI SQL generation, SQL Iteration, and SQL repair stream partial text back into the UI. Database query Result Sets do not stream in V0.1.
@@ -121,12 +141,24 @@ The confirmed implementation stack for V0.1: Tauri 2 for the desktop app shell, 
 _Avoid_: Electron, SwiftUI-first implementation, custom SQL editor
 
 **OpenAI-compatible Model Provider**:
-The globally configured AI model endpoint used by Glimpse through `base_url`, `api_key`, `model`, `temperature`, and `max_tokens`. It may point to OpenAI, DeepSeek, Qwen, an internal model service, Ollama, LM Studio, or another OpenAI-compatible service.
+An AI model endpoint used by Glimpse through `base_url`, `api_key`, `model`, `temperature`, and `max_tokens`. It may point to OpenAI, DeepSeek, Qwen, an internal model service, Ollama, LM Studio, or another OpenAI-compatible service.
 _Avoid_: Hard-coded OpenAI-only provider
 
 **Global AI Configuration**:
 The single V0.1 AI configuration shared across all database connections. Database connections do not override model provider settings in V0.1.
 _Avoid_: Per-connection AI configuration
+
+**Model Provider Registry**:
+The V0.2 global collection of saved OpenAI-compatible Model Provider configurations. It supports multiple provider records while remaining global to the app rather than scoped to individual Database Connections.
+_Avoid_: Per-connection AI configuration, hard-coded single provider
+
+**Model Provider Management Dialog**:
+The V0.2 modal surface for creating and editing Model Provider records. It uses a left list of saved providers and a right form for the selected provider or a new empty provider; using the add action opens an empty form, and saving refreshes the list and selects the saved item.
+_Avoid_: New-only model provider dialog, per-connection provider setup
+
+**Default Model Provider**:
+The currently selected Model Provider from the Model Provider Registry that Glimpse uses for SQL generation, SQL Iteration, Auto Table Discovery, and SQL repair unless the user explicitly switches it.
+_Avoid_: Hidden provider selection, database-bound model provider
 
 **Query History**:
 Persisted local history of generated, edited, and executed SQL, including relevant execution errors and result metadata where useful.
@@ -144,6 +176,26 @@ _Avoid_: Current-session-only AI context
 A persisted unit of SQL work that starts from a user query need and contains the bound database connection, Default Database/Schema, Candidate Table Set, SQL drafts, generated SQL, explanations, AI Conversation History, execution attempts, Execution Result Metadata, and errors.
 _Avoid_: Unstructured global chat history, unrelated SQL snippets in one timeline
 
+**SQL Console**:
+The V0.2 UI presentation of a connection-scoped Query Session. A SQL Console belongs to one Database Connection, has its own SQL Draft and execution history, appears as a tab or console entry, and drives the active SQL editor and Result Set view when selected.
+_Avoid_: One global SQL editor for all connections, connectionless console, unrelated SQL snippets in one console
+
+**New Console Command**:
+The V0.2 command that creates a SQL Console for the currently selected Database Connection. The main entry point lives in the Database Connection Tree; double-clicking a Database Connection opens its most recent SQL Console or creates one if none exists.
+_Avoid_: Creating a console without a Database Connection, global new console with ambiguous connection ownership
+
+**V0.2 Minimal Toolbar**:
+The V0.2 toolbar scope that keeps fixed entry points limited to Data Source Management, Model Provider Management, New Console, Preferences, and SQL Run. It avoids placeholder database-IDE actions until their behavior is part of the product scope.
+_Avoid_: Decorative IDE-style toolbar buttons, unsupported DDL/table-view/sync actions
+
+**SQL Console List**:
+The V0.2 right-side switchable view that lists created SQL Consoles and lets users switch the active SQL Console. Selecting a console changes the active SQL editor and Result Set view to that console's SQL Draft and execution state.
+_Avoid_: Hidden console switching
+
+**Right-side Content Switcher**:
+The V0.2 control at the top of the right-side workspace area for switching between SQL Console List and AI Conversation View. It keeps console switching and AI conversation in the same right-side region without showing both at once.
+_Avoid_: Separate permanent right panels for console list and AI chat, burying AI conversation in a modal-only flow
+
 **Execution Result Metadata**:
 Persisted metadata about a SQL execution attempt, such as executed SQL, timestamp, duration, row count, success/failure state, and error message.
 _Avoid_: Full result set persistence
@@ -151,6 +203,10 @@ _Avoid_: Full result set persistence
 **Result Set**:
 The actual rows and values returned by executing SQL. In V0.1, Result Sets are displayed in the UI but are not persisted as part of Query Session history.
 _Avoid_: Saved business data by default
+
+**Active Console Result Set**:
+The V0.2 bottom results view for the most recent Result Set produced by the active SQL Console. Switching consoles switches the results view to that console's current in-memory result state; V0.2 does not require multiple result tabs.
+_Avoid_: Multiple persistent result tabs in V0.2, result rows persisted in Query Session history
 
 **Result Copying**:
 The V0.1 ability to copy visible query results and SQL from the UI without persisting result rows or exporting files.
@@ -200,6 +256,14 @@ _Avoid_: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, hidden execution
 **Manual Execution Gate**:
 The rule that AI-generated SQL must be shown to the user before execution, and Glimpse only executes after an explicit user action.
 _Avoid_: Auto-execute generated SQL, hidden execution
+
+**Run Current Statement**:
+The V0.2 SQL execution command used when the SQL editor has no selected text. It executes the complete SQL statement containing the cursor, not merely the visual line containing the cursor.
+_Avoid_: Run current line, execute entire editor by default
+
+**Run Selected Statements**:
+The V0.2 SQL execution behavior used when the SQL editor has selected text. It executes one or more SQL statements from the selection in order and stops at the first failed statement.
+_Avoid_: Treating selected multi-statement SQL as one opaque statement, executing unselected editor content, continuing after execution failure
 
 **Developer Freedom Execution Mode**:
 The V0.1 execution policy for query scale controls: Glimpse blocks write or schema-changing SQL, but only warns about missing `LIMIT`, long-running queries, or large result sets instead of automatically rewriting SQL or forcing limits.
