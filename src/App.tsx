@@ -41,12 +41,22 @@ interface AppProps {
     configuration: GlobalAiConfiguration,
     apiKey: string,
   ) => Promise<AiProviderTestResult>;
+  aiConversationResponder?: (
+    input: AiConversationResponderInput,
+  ) => Promise<string>;
   candidateTableDiscoverer?: (
     input: DiscoverCandidateTablesInput,
   ) => Promise<CandidateTable[]>;
   sqlGenerator?: (input: GenerateSqlFromQueryNeedInput) => Promise<string>;
   sqlModifier?: (input: ModifySqlFromIntentInput) => Promise<string>;
   sqlRepairer?: (input: RepairSqlFromExecutionErrorInput) => Promise<string>;
+}
+
+interface AiConversationResponderInput {
+  message: string;
+  session: QuerySession;
+  configuration: GlobalAiConfiguration;
+  apiKey: string;
 }
 
 interface AiConfigurationFormState {
@@ -116,6 +126,7 @@ const emptyDatabaseConnectionForm: DatabaseConnectionInput = {
 export function App({
   localPersistence = defaultLocalPersistence,
   aiProviderTester = runStreamingAiProviderTest,
+  aiConversationResponder = sendAiConversationMessageToModel,
   candidateTableDiscoverer = discoverCandidateTables,
   sqlGenerator = generateSqlFromQueryNeed,
   sqlModifier = modifySqlFromIntent,
@@ -160,6 +171,11 @@ export function App({
   const [selectedDatabaseConnectionId, setSelectedDatabaseConnectionId] = useState<string | null>(
     null,
   );
+  const [rightSideView, setRightSideView] = useState<"sqlConsoles" | "aiConversation">(
+    "sqlConsoles",
+  );
+  const [aiMessageDraft, setAiMessageDraft] = useState("");
+  const [aiConversationStatus, setAiConversationStatus] = useState("");
   const [activeDialog, setActiveDialog] = useState<
     "dataSources" | "modelProviders" | "preferences" | null
   >(null);
@@ -834,6 +850,61 @@ export function App({
     }
   };
 
+  const sendAiConversationMessage = async () => {
+    if (!currentQuerySession) {
+      setAiConversationStatus("Create a SQL Console before sending an AI message");
+      return;
+    }
+
+    const message = aiMessageDraft.trim();
+    if (!message) {
+      setAiConversationStatus("AI message is required");
+      return;
+    }
+
+    const { configuration, apiKey } = await getDefaultAiProviderCredentials();
+    if (!configuration.baseUrl || !configuration.model || !apiKey) {
+      setAiConversationStatus("Default Model Provider and API key are required");
+      return;
+    }
+
+    const conversationSession = currentQuerySession;
+    setAiConversationStatus("Sending AI message");
+
+    try {
+      const assistantContent = await aiConversationResponder({
+        message,
+        session: conversationSession,
+        configuration,
+        apiKey,
+      });
+      const savedSession = await localPersistence.querySessions.saveAiConversationHistory(
+        conversationSession.id,
+        [
+          ...conversationSession.aiConversationHistory,
+          {
+            id: createUiLocalId(),
+            role: "user",
+            content: message,
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: createUiLocalId(),
+            role: "assistant",
+            content: assistantContent,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      );
+
+      updateCurrentQuerySession(savedSession);
+      setAiMessageDraft("");
+      setAiConversationStatus("AI message sent");
+    } catch (error) {
+      setAiConversationStatus(formatAiConversationError(error));
+    }
+  };
+
   const runSqlRepair = async () => {
     if (!currentQuerySession) {
       setSqlGenerationStatus("Create a Query Session before repairing SQL");
@@ -1316,41 +1387,92 @@ export function App({
 
       <section className="sidebar sidebar-right" aria-label="Right-side Content Switcher">
         <div className="right-side-switcher" role="tablist" aria-label="Right-side views">
-          <button type="button" role="tab" aria-selected="true">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={rightSideView === "sqlConsoles"}
+            onClick={() => setRightSideView("sqlConsoles")}
+          >
             SQL Console List
           </button>
-          <button type="button" role="tab" aria-selected="false">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={rightSideView === "aiConversation"}
+            onClick={() => setRightSideView("aiConversation")}
+          >
             AI Conversation View
           </button>
         </div>
-        <section aria-label="SQL Console List" className="panel">
-          <div className="panel-title">SQL Console List</div>
-          {querySessions.length === 0 ? (
-            <div className="placeholder-row">No SQL Consoles yet</div>
-          ) : (
-            <div className="session-list" role="list" aria-label="SQL Console List">
-              {querySessions.map((session) => (
-                <article className="session-row" key={session.id}>
-                  <button
-                    className="session-open-button"
-                    type="button"
-                    aria-label={`Open SQL Console ${session.connectionName} ${session.defaultDatabase} ${formatSessionSqlPreview(session)}${
-                      currentQuerySession?.id === session.id ? " active" : ""
-                    }`}
-                    aria-pressed={currentQuerySession?.id === session.id}
-                    onClick={() => openQuerySession(session)}
-                  >
-                    <strong>{session.connectionName}</strong>
-                    <span>
-                      {session.connectionName} / {session.defaultDatabase}
-                    </span>
-                    <small>{formatSessionSqlPreview(session)}</small>
-                  </button>
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
+        {rightSideView === "sqlConsoles" ? (
+          <section aria-label="SQL Console List" className="panel">
+            <div className="panel-title">SQL Console List</div>
+            {querySessions.length === 0 ? (
+              <div className="placeholder-row">No SQL Consoles yet</div>
+            ) : (
+              <div className="session-list" role="list" aria-label="SQL Console List">
+                {querySessions.map((session) => (
+                  <article className="session-row" key={session.id}>
+                    <button
+                      className="session-open-button"
+                      type="button"
+                      aria-label={`Open SQL Console ${session.connectionName} ${session.defaultDatabase} ${formatSessionSqlPreview(session)}${
+                        currentQuerySession?.id === session.id ? " active" : ""
+                      }`}
+                      aria-pressed={currentQuerySession?.id === session.id}
+                      onClick={() => openQuerySession(session)}
+                    >
+                      <strong>{session.connectionName}</strong>
+                      <span>
+                        {session.connectionName} / {session.defaultDatabase}
+                      </span>
+                      <small>{formatSessionSqlPreview(session)}</small>
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        ) : (
+          <section aria-label="AI Conversation View" className="panel ai-conversation-view">
+            <div className="panel-title">AI Conversation View</div>
+            <section aria-label="AI conversation history" className="conversation-history-panel">
+              {currentQuerySession?.aiConversationHistory.length ? (
+                <div className="conversation-list">
+                  {currentQuerySession.aiConversationHistory.map((entry) => (
+                    <article className="conversation-row" key={entry.id}>
+                      <strong>{entry.role === "user" ? "User" : "Assistant"}</strong>
+                      <span>{entry.createdAt}</span>
+                      <p>{entry.content}</p>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="placeholder-row">No AI conversation yet</div>
+              )}
+            </section>
+            <label className="field ai-message-composer">
+              <span>AI message</span>
+              <textarea
+                className="query-need-input"
+                value={aiMessageDraft}
+                onChange={(event) => setAiMessageDraft(event.target.value)}
+                placeholder="Ask the assistant about this SQL Console"
+              />
+            </label>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={sendAiConversationMessage}
+              disabled={!currentQuerySession}
+            >
+              Send AI message
+            </button>
+            {aiConversationStatus ? (
+              <div className="status-line">{aiConversationStatus}</div>
+            ) : null}
+          </section>
+        )}
 
         <section aria-label="AI assistant" className="panel">
           <div className="panel-title">AI Assistant</div>
@@ -2090,8 +2212,71 @@ function formatSqlRepairError(error: unknown) {
   return `SQL repair failed: ${message}`;
 }
 
+function formatAiConversationError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return `AI conversation failed: ${message}`;
+}
+
 function formatSqlExecutionError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function sendAiConversationMessageToModel({
+  message,
+  session,
+  configuration,
+  apiKey,
+}: AiConversationResponderInput): Promise<string> {
+  const response = await fetch(`${configuration.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: configuration.model,
+      temperature: configuration.temperature,
+      max_tokens: configuration.maxTokens,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an SQL workbench assistant. Help with the active SQL Console only. Keep answers concise and grounded in the current SQL draft and conversation history.",
+        },
+        ...session.aiConversationHistory.map((entry) => ({
+          role: entry.role,
+          content: entry.content,
+        })),
+        {
+          role: "user",
+          content: JSON.stringify({
+            message,
+            activeSqlConsole: {
+              id: session.id,
+              databaseConnectionId: session.databaseConnectionId,
+              defaultDatabase: session.defaultDatabase,
+              sqlDraft: session.sqlDraft,
+              candidateTables: session.candidateTables,
+              executionResultMetadata: session.executionResultMetadata,
+            },
+          }),
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`model request failed with status ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const content = payload?.choices?.[0]?.message?.content;
+
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("model response did not include assistant content");
+  }
+
+  return content.trim();
 }
 
 function getLatestFailedExecution(
