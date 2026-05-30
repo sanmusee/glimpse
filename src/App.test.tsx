@@ -1778,7 +1778,9 @@ describe("Glimpse app shell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /generate sql/i }));
 
-    const sqlEditor = await screen.findByRole("textbox", { name: /sql draft/i });
+    const sqlEditor = (await screen.findByRole("textbox", {
+      name: /sql draft/i,
+    })) as HTMLTextAreaElement;
     await waitFor(() =>
       expect(sqlEditor).toHaveValue(
         "select customer_id, count(*) as order_count from orders group by customer_id",
@@ -1926,7 +1928,9 @@ describe("Glimpse app shell", () => {
       ),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /new session for warehouse/i }));
-    const sqlEditor = await screen.findByRole("textbox", { name: /sql draft/i });
+    const sqlEditor = (await screen.findByRole("textbox", {
+      name: /sql draft/i,
+    })) as HTMLTextAreaElement;
     fireEvent.change(sqlEditor, { target: { value: "select id from orders" } });
     fireEvent.change(screen.getByRole("combobox", { name: /add candidate table/i }), {
       target: { value: "orders" },
@@ -2029,6 +2033,243 @@ describe("Glimpse app shell", () => {
           rowCount: 2,
           columns: ["id", "amount"],
           errorMessage: undefined,
+        }),
+      ],
+    });
+  });
+
+  it("runs only the current SQL statement containing the cursor when no text is selected", async () => {
+    const executionAttempts: string[] = [];
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: (input) => {
+        executionAttempts.push(input.sql);
+
+        return {
+          ok: true,
+          rowCount: 1,
+          columns: ["id"],
+          rows: [[1]],
+        };
+      },
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    const sqlEditor = (await screen.findByRole("textbox", {
+      name: /sql draft/i,
+    })) as HTMLTextAreaElement;
+    const sql = [
+      "select * from draft_notes limit 1;",
+      "select id,",
+      "  amount",
+      "from orders",
+      "where status = 'paid'",
+      "limit 10;",
+      "select * from later_statement limit 1;",
+    ].join("\n");
+    fireEvent.change(sqlEditor, { target: { value: sql } });
+    const cursor = sql.indexOf("where status");
+    sqlEditor.setSelectionRange(cursor, cursor);
+
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByText(/execution succeeded: 1 rows, 1 columns/i))
+      .toBeInTheDocument();
+    expect(executionAttempts).toEqual([
+      [
+        "select id,",
+        "  amount",
+        "from orders",
+        "where status = 'paid'",
+        "limit 10",
+      ].join("\n"),
+    ]);
+  });
+
+  it("runs selected SQL statements in order", async () => {
+    const executionAttempts: string[] = [];
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: (input) => {
+        executionAttempts.push(input.sql);
+
+        return {
+          ok: true,
+          rowCount: executionAttempts.length,
+          columns: ["statement_label"],
+          rows: [[`statement-${executionAttempts.length}`]],
+        };
+      },
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    const sqlEditor = (await screen.findByRole("textbox", {
+      name: /sql draft/i,
+    })) as HTMLTextAreaElement;
+    const sql = [
+      "select * from unselected_before limit 1;",
+      "select * from orders limit 10;",
+      "select * from customers limit 5;",
+      "select * from unselected_after limit 1;",
+    ].join("\n");
+    fireEvent.change(sqlEditor, { target: { value: sql } });
+    const selectionStart = sql.indexOf("select * from orders");
+    const selectionEnd = sql.indexOf("select * from unselected_after") - 1;
+    sqlEditor.setSelectionRange(selectionStart, selectionEnd);
+
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByText(/execution succeeded: 2 rows, 1 columns/i))
+      .toBeInTheDocument();
+    expect(await screen.findByText("statement-2")).toBeInTheDocument();
+    expect(executionAttempts).toEqual([
+      "select * from orders limit 10",
+      "select * from customers limit 5",
+    ]);
+  });
+
+  it("stops selected SQL statement execution at the first failed statement", async () => {
+    const executionAttempts: string[] = [];
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: (input) => {
+        executionAttempts.push(input.sql);
+
+        if (input.sql.includes("missing_column")) {
+          return {
+            ok: false,
+            errorMessage: "Unknown column 'missing_column'",
+          };
+        }
+
+        return {
+          ok: true,
+          rowCount: 1,
+          columns: ["id"],
+          rows: [[1]],
+        };
+      },
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    const sqlEditor = (await screen.findByRole("textbox", {
+      name: /sql draft/i,
+    })) as HTMLTextAreaElement;
+    const sql = [
+      "select id from orders limit 1;",
+      "select missing_column from orders limit 1;",
+      "select id from customers limit 1;",
+    ].join("\n");
+    fireEvent.change(sqlEditor, { target: { value: sql } });
+    sqlEditor.setSelectionRange(0, sql.length);
+
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByText(/execution failed: unknown column 'missing_column'/i))
+      .toBeInTheDocument();
+    expect(executionAttempts).toEqual([
+      "select id from orders limit 1",
+      "select missing_column from orders limit 1",
+    ]);
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      executionResultMetadata: [
+        expect.objectContaining({
+          sql: "select id from orders limit 1",
+          errorMessage: undefined,
+        }),
+        expect.objectContaining({
+          sql: "select missing_column from orders limit 1",
+          errorMessage: "Unknown column 'missing_column'",
+        }),
+      ],
+    });
+  });
+
+  it("applies Read-only Mode validation to each selected statement and stops before later statements", async () => {
+    const executionAttempts: string[] = [];
+    const localPersistence = createInMemoryLocalPersistence({
+      databaseConnections: [
+        {
+          id: "db-1",
+          name: "Warehouse",
+          host: "warehouse.internal",
+          port: 3306,
+          username: "readonly",
+          passwordSecretId: "database-connection:db-1:password",
+          defaultDatabase: "warehouse",
+        },
+      ],
+      executeSql: (input) => {
+        executionAttempts.push(input.sql);
+
+        return {
+          ok: true,
+          rowCount: 1,
+          columns: ["id"],
+          rows: [[1]],
+        };
+      },
+    });
+
+    render(<App localPersistence={localPersistence} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new session for warehouse/i }));
+    const sqlEditor = (await screen.findByRole("textbox", {
+      name: /sql draft/i,
+    })) as HTMLTextAreaElement;
+    const sql = [
+      "select id from orders limit 1;",
+      "delete from orders where id = 1;",
+      "select id from customers limit 1;",
+    ].join("\n");
+    fireEvent.change(sqlEditor, { target: { value: sql } });
+    sqlEditor.setSelectionRange(0, sql.length);
+
+    fireEvent.click(screen.getByRole("button", { name: /run sql in read-only mode/i }));
+
+    expect(await screen.findByText(/read-only mode blocks delete statements/i))
+      .toBeInTheDocument();
+    expect(executionAttempts).toEqual(["select id from orders limit 1"]);
+    await expect(localPersistence.querySessions.getRestoredQuerySession()).resolves.toMatchObject({
+      executionResultMetadata: [
+        expect.objectContaining({
+          sql: "select id from orders limit 1",
         }),
       ],
     });

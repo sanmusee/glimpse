@@ -33,7 +33,7 @@ import {
   type SqlResultRow,
   type ThemePreference,
 } from "./platform/localPersistence";
-import { validateSqlForExecution } from "./sqlExecution";
+import { getSqlStatementsToRun, validateSqlForExecution } from "./sqlExecution";
 
 interface AppProps {
   localPersistence?: LocalPersistence;
@@ -180,6 +180,7 @@ export function App({
     "dataSources" | "modelProviders" | "preferences" | null
   >(null);
   const userSelectedThemePreference = useRef(false);
+  const sqlDraftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedDatabaseConnection =
     databaseConnections.find((connection) => connection.id === selectedDatabaseConnectionId) ?? null;
   const activeConsoleExecutionState = currentQuerySession
@@ -771,67 +772,90 @@ export function App({
       return;
     }
 
-    const validation = validateSqlForExecution(currentQuerySession.sqlDraft, "readOnly");
-    updateConsoleExecutionState(currentQuerySession.id, { warnings: validation.warnings });
-
-    if (!validation.normalizedSql) {
+    const selectionStart =
+      sqlDraftTextareaRef.current?.selectionStart ?? currentQuerySession.sqlDraft.length;
+    const selectionEnd =
+      sqlDraftTextareaRef.current?.selectionEnd ?? currentQuerySession.sqlDraft.length;
+    const statementsToRun = getSqlStatementsToRun(
+      currentQuerySession.sqlDraft,
+      selectionStart,
+      selectionEnd,
+    );
+    if (statementsToRun.length === 0) {
       updateConsoleExecutionState(currentQuerySession.id, { status: "SQL draft is required" });
-      return;
-    }
-
-    if (!validation.canExecute) {
-      updateConsoleExecutionState(currentQuerySession.id, {
-        status: validation.blockedReason ?? "SQL is blocked in Read-only Mode",
-      });
       return;
     }
 
     const executionSession = currentQuerySession;
     updateConsoleExecutionState(executionSession.id, {
       status: "Running SQL in Read-only Mode",
+      warnings: [],
       resultSet: null,
     });
 
-    try {
-      const result = await localPersistence.sqlExecution.executeSql({
-        connectionId: executionSession.databaseConnectionId,
-        sql: validation.normalizedSql,
-        safetyMode: validation.safetyMode,
-      });
-      const metadata: ExecutionResultMetadata =
-        result.ok
-          ? {
-              id: createUiLocalId(),
-              sql: validation.normalizedSql,
-              rowCount: result.rowCount,
-              columns: result.columns,
-              executedAt: new Date().toISOString(),
-            }
-          : {
-              id: createUiLocalId(),
-              sql: validation.normalizedSql,
-              rowCount: 0,
-              columns: [],
-              executedAt: new Date().toISOString(),
-              errorMessage: result.errorMessage,
-            };
-      const savedSession = await localPersistence.querySessions.saveExecutionResultMetadata(
-        executionSession.id,
-        [...executionSession.executionResultMetadata, metadata],
-      );
+    const nextExecutionResultMetadata = [...executionSession.executionResultMetadata];
+    let executingSql = statementsToRun[0] ?? "";
 
-      updateQuerySessionInState(savedSession);
-      updateConsoleExecutionState(executionSession.id, {
-        resultSet: result.ok ? { columns: result.columns, rows: result.rows } : null,
-        status: result.ok
-          ? `Execution succeeded: ${result.rowCount} rows, ${result.columns.length} columns`
-          : `Execution failed: ${result.errorMessage}`,
-      });
+    try {
+      for (const statement of statementsToRun) {
+        const validation = validateSqlForExecution(statement, "readOnly");
+        executingSql = validation.normalizedSql;
+        updateConsoleExecutionState(executionSession.id, { warnings: validation.warnings });
+
+        if (!validation.canExecute) {
+          updateConsoleExecutionState(executionSession.id, {
+            resultSet: null,
+            status: validation.blockedReason ?? "SQL is blocked in Read-only Mode",
+          });
+          return;
+        }
+
+        const result = await localPersistence.sqlExecution.executeSql({
+          connectionId: executionSession.databaseConnectionId,
+          sql: validation.normalizedSql,
+          safetyMode: validation.safetyMode,
+        });
+        const metadata: ExecutionResultMetadata =
+          result.ok
+            ? {
+                id: createUiLocalId(),
+                sql: validation.normalizedSql,
+                rowCount: result.rowCount,
+                columns: result.columns,
+                executedAt: new Date().toISOString(),
+              }
+            : {
+                id: createUiLocalId(),
+                sql: validation.normalizedSql,
+                rowCount: 0,
+                columns: [],
+                executedAt: new Date().toISOString(),
+                errorMessage: result.errorMessage,
+              };
+
+        nextExecutionResultMetadata.push(metadata);
+        const savedSession = await localPersistence.querySessions.saveExecutionResultMetadata(
+          executionSession.id,
+          nextExecutionResultMetadata,
+        );
+
+        updateQuerySessionInState(savedSession);
+        updateConsoleExecutionState(executionSession.id, {
+          resultSet: result.ok ? { columns: result.columns, rows: result.rows } : null,
+          status: result.ok
+            ? `Execution succeeded: ${result.rowCount} rows, ${result.columns.length} columns`
+            : `Execution failed: ${result.errorMessage}`,
+        });
+
+        if (!result.ok) {
+          return;
+        }
+      }
     } catch (error) {
       const message = formatSqlExecutionError(error);
       const metadata: ExecutionResultMetadata = {
         id: createUiLocalId(),
-        sql: validation.normalizedSql,
+        sql: executingSql,
         rowCount: 0,
         columns: [],
         executedAt: new Date().toISOString(),
@@ -839,7 +863,7 @@ export function App({
       };
       const savedSession = await localPersistence.querySessions.saveExecutionResultMetadata(
         executionSession.id,
-        [...executionSession.executionResultMetadata, metadata],
+        [...nextExecutionResultMetadata, metadata],
       );
 
       updateQuerySessionInState(savedSession);
@@ -1313,6 +1337,7 @@ export function App({
             onChange={(event) => updateSqlDraft(event.target.value)}
             placeholder={`-- AI-generated SQL will appear here.
 -- Review it before running in Read-only Mode.`}
+            ref={sqlDraftTextareaRef}
             value={currentQuerySession?.sqlDraft ?? ""}
           />
           <div className="editor-actions">
