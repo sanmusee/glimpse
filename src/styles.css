@@ -62,6 +62,7 @@ body {
   min-width: 1080px;
   min-height: 100vh;
   background: var(--app-bg);
+  overflow: hidden;
 }
 
 .app-shell {
@@ -583,11 +584,18 @@ button:disabled {
 .editor-panel,
 .results-panel {
   min-height: 0;
+  overflow: auto;
+}
+
+.editor-panel {
+  display: flex;
+  flex-direction: column;
 }
 
 .editor-surface {
   margin: 12px;
-  min-height: calc(100% - 118px);
+  min-height: 0;
+  flex: 1;
   border: 1px solid var(--editor-border);
   border-radius: 8px;
   background: var(--editor-bg);
@@ -596,6 +604,8 @@ button:disabled {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 13px;
   line-height: 1.6;
+  overflow: auto;
+  resize: none;
   white-space: pre-wrap;
 }
 
@@ -634,7 +644,8 @@ button:disabled {
 
 .result-table-scroll {
   margin: 12px;
-  overflow-x: auto;
+  max-height: min(420px, calc(100% - 24px));
+  overflow: auto;
   border: 1px solid var(--panel-border);
   border-radius: 8px;
 }
