@@ -65,6 +65,36 @@ export function validateSqlForExecution(
   };
 }
 
+export function getSqlStatementsToRun(
+  sql: string,
+  selectionStart: number,
+  selectionEnd: number,
+) {
+  if (selectionStart !== selectionEnd) {
+    return splitSqlStatements(sql.slice(selectionStart, selectionEnd));
+  }
+
+  const cursorPosition = getStatementCursorPosition(sql, selectionStart);
+  return splitSqlStatementRanges(sql)
+    .filter((range) => range.start <= cursorPosition && cursorPosition <= range.end)
+    .map((range) => sql.slice(range.start, range.end).trim())
+    .filter(Boolean);
+}
+
+function getStatementCursorPosition(sql: string, selectionStart: number) {
+  let cursorPosition = Math.min(selectionStart, sql.length);
+
+  while (cursorPosition > 0 && /\s/.test(sql[cursorPosition - 1] ?? "")) {
+    cursorPosition -= 1;
+  }
+
+  if (cursorPosition > 0 && sql[cursorPosition - 1] === ";") {
+    cursorPosition -= 1;
+  }
+
+  return cursorPosition;
+}
+
 function firstKeyword(statement: string) {
   return statement.match(/\b[a-z_]+\b/)?.[0] ?? "";
 }
@@ -74,10 +104,68 @@ function hasLimitClause(sql: string) {
 }
 
 function splitSqlStatements(sql: string) {
-  return sql
-    .split(";")
-    .map((statement) => statement.trim())
+  return splitSqlStatementRanges(sql)
+    .map((range) => sql.slice(range.start, range.end).trim())
     .filter(Boolean);
+}
+
+function splitSqlStatementRanges(sql: string) {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let statementStart = 0;
+  let index = 0;
+  let quote: "'" | '"' | "`" | null = null;
+
+  while (index < sql.length) {
+    const current = sql[index];
+    const next = sql[index + 1];
+
+    if (quote) {
+      if (current === "\\" && quote !== "`") {
+        index += 2;
+        continue;
+      }
+
+      if (current === quote) {
+        quote = null;
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (current === "-" && next === "-") {
+      index += 2;
+      while (index < sql.length && sql[index] !== "\n") {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (current === "/" && next === "*") {
+      index += 2;
+      while (index < sql.length && !(sql[index] === "*" && sql[index + 1] === "/")) {
+        index += 1;
+      }
+      index = Math.min(index + 2, sql.length);
+      continue;
+    }
+
+    if (current === "'" || current === '"' || current === "`") {
+      quote = current;
+      index += 1;
+      continue;
+    }
+
+    if (current === ";") {
+      ranges.push({ start: statementStart, end: index });
+      statementStart = index + 1;
+    }
+
+    index += 1;
+  }
+
+  ranges.push({ start: statementStart, end: sql.length });
+  return ranges;
 }
 
 function stripSqlCommentsAndLiterals(sql: string) {
